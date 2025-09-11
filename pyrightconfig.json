@@ -1,0 +1,4 @@
+{
+  "venvPath": ".",
+  "venv": ".venv" // or wherever your python virtual environment is located
+}
