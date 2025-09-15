@@ -44,7 +44,7 @@ class TerminalIO:
         # accumulate chunks, printing as we go
         thinking = ""
         content = ""
-        tool_calls = []
+        tool_calls = None
         complete_response = None
         started_thinking = False
         finished_thinking = False
@@ -70,7 +70,8 @@ class TerminalIO:
                     self.console.style = OutputDisplayMode.AGENT_CONTENT.style
                     self.console.print(chunk.message.content,end='')
                 if chunk.message.tool_calls:
-                    tool_calls.append(chunk.message.tool_calls)
+                    assert tool_calls == None # because we are not expecting to enter this condition more than once!
+                    tool_calls = chunk.message.tool_calls
                     self.console.style = OutputDisplayMode.AGENT_TOOLING.style
                     for toolcall in chunk.message.tool_calls:
                         self.console.print(f"\nToolCall({toolcall})")

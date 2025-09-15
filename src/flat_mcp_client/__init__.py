@@ -1,5 +1,6 @@
 # LOGGER
 import logging
+from pprint import pprint
 
 logging.basicConfig(
     level=logging.WARNING, # Default minimum level for the entire application
@@ -18,3 +19,8 @@ def warning(msg) -> None:
 
 def error(msg) -> None:
     package_logger.error(msg)
+
+def debug_pp(msg) -> None:
+    package_logger.debug(msg)
+    if package_logger.level >= logging.DEBUG:
+        pprint(msg)

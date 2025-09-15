@@ -8,10 +8,9 @@ import asyncio
 import logging
 
 from flat_mcp_client.models import OllamaModel
+from flat_mcp_client.tools import Workshop
 from flat_mcp_client.io.ui import HumanInterface
-from flat_mcp_client import debug
-
-#from fastmcp.exceptions import ToolError
+from flat_mcp_client import debug, debug_pp
 
 # DECLARATIONS OF ENUMS
 ModelProvider = Enum('ModelProvider', [
@@ -66,25 +65,37 @@ class Context:
 
     def derive_extended_chat_history(
         self,
-        user_prompt: str,
+        user_prompt: str | None,
         agent_response: dict = {},
     ) -> list:
-            """Accounting for conversation history, generate a response to the user's latest query"""
-            # system prompt...
-            messages = [
-                {
-                    "role": "system",
-                    "content": self.system_prompt,
-                }
-            ]
-            # ...appended to conversation history...
+            """Accounting for latest turn of user and/or agent, generate an extended version of the chat history"""
+            messages = []
+            # add conversation history...
             messages.extend(self.chat_history)
-            # ...including latest message from user...
-            messages.append({"role": "user", "content": user_prompt})
-            # ...and the latest respone (which may contain tool calls)...
+            # ...then latest message from user...
+            if user_prompt:
+                messages.append({"role": "user", "content": user_prompt})
+            # ...and then latest respone (which may contain tool calls)...
             if agent_response:
                 messages.append(agent_response)
             return messages
+
+
+    def derive_full_history(self) -> list:
+        """System prompt + chat history
+        """
+        # system prompt...
+        messages = [
+            {
+                "role": "system",
+                "content": self.system_prompt,
+            }
+        ]
+        messages.extend(self.chat_history)
+        debug("~~~FULL HISTORY AS CONTEXT FOR NEXT INFERENCE CALL~~~")
+        debug_pp(messages)
+        debug("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+        return messages
 
 
 
@@ -124,19 +135,52 @@ class Agent:
         self.io = HumanInterface()
 
 
-    async def init_workspace(
+    async def init_workshop(
         self,
-        tools: list = [],
+        tool_collections: tuple = (),
         resources: list = [],
     ) -> None:
-        self.list_of_all_tools = []
-        # TODO: SETUP WORKSPACE PROPERLY
+        self.workshop = Workshop()
+        await self.workshop.setup_toolboxes(tool_collections)
+        self.list_of_all_tools = self.workshop.list_of_all_tools()
+        # todo: inventory resourcess
 
 
-    async def agentic_response(self, user_prompt) -> tuple[str, list, int, list]:
+    async def call_tools(self, tool_calls:list) -> dict:
+        """ call tools, make small modification as necessary, and return a dictionary whose keys are
+        (function name, parameters as frozensets) and whose values are the return values of the respective calls """
+        returns = {}
+        if not isinstance(tool_calls, list):
+            tool_calls = [tool_calls]
+        for tool_call in tool_calls:
+            # TODO: if this is really necessary, we should filter only on mcp tool calls
+            #   and ensure that ctx is not a requisite argument
+            tool_call.function.arguments.pop('ctx', None) # special handling for mcp
+            function = tool_call.function.name
+            arguments = tool_call.function.arguments
+            dict_key = (function, frozenset(arguments.items()))
+            returns[dict_key] = await self.workshop.call(function, arguments)
+        return returns
+
+
+    def update_chat_history(
+        self, user_prompt: str | None = None,
+        agent_response: dict = {},
+        tool_results: dict = {}
+    ) -> None:
+        updated_history = self.model.extend_messages_with_tool_responses(
+            self.context.derive_extended_chat_history(user_prompt, agent_response),
+            tool_results
+        )
+        self.context.chat_history = updated_history
+
+
+    async def agentic_response(self, user_prompt: str | None) -> tuple[str, list, int, list]:
         """Intended to be called for a single turn of conversation, this function allows agent to
         perform a series of inference calls before expressing a final response.
         """
+        # update chat history with user's latest prompt
+        self.update_chat_history(user_prompt = user_prompt)
         # remember latest agent tool calls (+results), responses, and thinking contents
         tool_calls = []
         agent_response = {}
@@ -153,37 +197,38 @@ class Agent:
             ((not self.max_inference_calls_per_turn) or (steps < self.max_inference_calls_per_turn))
         ):
             steps += 1
-            # TODO: within this turn, give agent context not only about the last tool and response,
-            # but all tools and responses that have transpired within this while loop
 
             # invoke chat API
             response_content, thinking_content, tool_calls = self.generate_and_stream_response(
-                user_prompt,
-                agent_response = agent_response,
-                tool_results = tool_results,
+                #latest_user_query,
+                #agent_response = agent_response,
+                #tool_results = tool_results,
             )
+            agent_response = {
+                'role': 'assistant',
+                'content': response_content,
+                'reasoning_content': thinking_content,
+                'tool_calls': tool_calls,
+            }
 
             # call tools selected by agent
             if tool_calls:
                 tool_results = {}
-                for tool_call_list in tool_calls:
+                for tool_call in tool_calls:
                     pass
-                    """
                     try:
-                        # TODO: bring back tool calling functionality
-                        result = {} #await self.call_tools(tool_call_list)
+                        result = await self.call_tools(tool_call)
                         tool_results.update(result)
                         print(f"-->{result}")
-                    except ToolError as e:
+                    except Exception as e:
                         print(f"--> Error encountered: {e}")
-                    """
-                agent_response = {
-                    'role': 'assistant',
-                    'content': response_content,
-                    'reasoning_content': thinking_content,
-                    'tool_calls': tool_calls[0],
-                }
                 tool_sequence.append(tool_results)
+
+            # update chat history accordingly
+            self.update_chat_history(
+                agent_response = agent_response,
+                tool_results = tool_results,
+            )
 
             # check termination condition
             match self.turn_termination_condition:
@@ -197,20 +242,22 @@ class Agent:
 
         final_tool_calls = tool_calls
         return response_content, final_tool_calls, steps, tool_sequence
-        # TODO: return the full history (in LLM syntax?)
+        # TODO: return the full history of the agent's turn
 
 
     def generate_and_stream_response(
-        self, user_prompt: str,
-        agent_response: dict = {},
-        tool_results: dict = {}
+        self,
+        # user_prompt: str,
+        #agent_response: dict = {},
+        #tool_results: dict = {}
     ) -> tuple[str,str,list]:
         """Compile augmented context and generate a response to the user's latest query"""
         response = self.model.generate_chat_response(
-            self.model.extend_messages_with_tool_responses(
-                self.context.derive_extended_chat_history(user_prompt, agent_response),
-                tool_results
-            ),
+            #self.model.extend_messages_with_tool_responses(
+            #    self.context.derive_extended_chat_history(user_prompt, agent_response),
+            #    tool_results
+            #),
+            self.context.derive_full_history(),
             structured_output = self.context.structured_output,
             tools = self.list_of_all_tools
         )
@@ -239,19 +286,20 @@ class Agent:
             self.context.reload_system_prompt()
             response_content, _, _, _ = await self.agentic_response(user_prompt)
 
-            # TODO: update chat + tool history
-
         # TODO: write chat history to disk
 
 
 
 
+
+
 async def main():
-    logging.getLogger('flat_mcp_client').setLevel(logging.DEBUG)
-    #logging.getLogger('httpx').setLevel(logging.WARNING)
+    #logging.getLogger('flat_mcp_client').setLevel(logging.DEBUG)
     #model = OllamaModel()
-    agent = Agent()
-    await agent.init_workspace()
+    agent = Agent(
+        turn_termination_condition = TerminationCondition.TERMINATE_WHEN_NO_FURTHER_TOOL_CALLS
+    )
+    await agent.init_workshop(tool_collections = ("geolocal_info", "crawl4ai"))
     await agent.chat()
 
 
