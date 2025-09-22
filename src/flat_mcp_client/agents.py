@@ -1,29 +1,28 @@
 import sys
-import ollama
-from typing import cast
-from enum import Enum
+import json
+from typing import Any, Literal, Annotated, cast, get_args
 from collections.abc import Iterator
 import importlib
-import asyncio
 import logging
+import cyclopts
 
-from flat_mcp_client.models import OllamaModel
+import ollama
+
+from flat_mcp_client.models import OllamaModel, VLLMModel
 from flat_mcp_client.tools import Workshop
+from flat_mcp_client.tool_defs import ExistingToolDefinitionNames
 from flat_mcp_client.io.ui import HumanInterface
-from flat_mcp_client import debug, debug_pp
+from flat_mcp_client import debug, debug_pp, error
 
-# DECLARATIONS OF ENUMS
-ModelProvider = Enum('ModelProvider', [
-    'OLLAMA',
-    'VLLM',
-])
+# USEFUL STRING LITERALS
+ModelProvider = Literal["ollama", "vllm"]
+TerminationCondition = Literal[
+    "inference_call_completed",
+    "nonempty_response_content",
+    "no_further_tool_calls",
+    "self_determined_termination"
+]
 
-TerminationCondition = Enum('TurnTerminationCondition', [
-    'INFERENCE_CALL_RETURNED',
-    'TERMINATE_WHEN_NONEMPTY_RESPONSE_CONTENT',
-    'TERMINATE_WHEN_NO_FURTHER_TOOL_CALLS',
-    'SELF_DETERMINED_TERMINATION',
-])
 
 
 class Context:
@@ -106,28 +105,30 @@ class Agent:
 
     def __init__(
         self,
-        model_provider = ModelProvider.OLLAMA,
+        model_provider: ModelProvider = "ollama",
         model_endpoint: str = "",
-        model_name: str = "gpt-oss:latest",
+        model_name: str = "",
         model_params: dict = {},
         prompt_name: str = "default",
-        turn_termination_condition = TerminationCondition.INFERENCE_CALL_RETURNED,
+        turn_termination_condition: TerminationCondition = "inference_call_completed",
         max_inference_calls_per_turn : int|None = None,
     ) -> None:
         # LLM particulars
-        if model_provider == ModelProvider.OLLAMA:
-            if model_endpoint:
-                self.model = OllamaModel(model_name=model_name, params=model_params, endpoint=model_endpoint)
-            else:
-                self.model = OllamaModel(model_name=model_name, params=model_params)
-        elif model_provider == ModelProvider.VLLM:
-            raise NotImplementedError("VLLM model support is coming soon...")
+        kwargs : dict[str,Any] = { "params": model_params, }
+        if (model_name):
+            kwargs["model_name"] = model_name
+        if (model_endpoint):
+            kwargs["endpoint"] = model_endpoint
+        # TODO: move the if-else tree below to a static instantiate_model() function in models.py
+        if model_provider == "ollama":
+            self.model = OllamaModel(**kwargs)
+        elif model_provider == "vllm":
+            self.model = VLLMModel(**kwargs)
         else:
             raise Exception(f"Model provider {model_provider} is not a member of {list(ModelProvider)}!")
         # context
         self.context = Context(prompt_name)
         # turn termination condition
-        assert isinstance(turn_termination_condition, TerminationCondition)
         self.turn_termination_condition = turn_termination_condition
         self.max_inference_calls_per_turn = max_inference_calls_per_turn
 
@@ -137,8 +138,8 @@ class Agent:
 
     async def init_workshop(
         self,
-        tool_collections: tuple = (),
-        resources: list = [],
+        tool_collections: list[str] = [],
+        resources: list[str] = [],
     ) -> None:
         self.workshop = Workshop()
         await self.workshop.setup_toolboxes(tool_collections)
@@ -153,13 +154,18 @@ class Agent:
         if not isinstance(tool_calls, list):
             tool_calls = [tool_calls]
         for tool_call in tool_calls:
-            # TODO: if this is really necessary, we should filter only on mcp tool calls
-            #   and ensure that ctx is not a requisite argument
-            tool_call.function.arguments.pop('ctx', None) # special handling for mcp
-            function = tool_call.function.name
-            arguments = tool_call.function.arguments
-            dict_key = (function, frozenset(arguments.items()))
-            returns[dict_key] = await self.workshop.call(function, arguments)
+            try:
+                function = tool_call.function.name
+                arguments = tool_call.function.arguments
+                # accept arguments either as json string or dict
+                if isinstance(arguments, str):
+                    arguments = json.loads(arguments)
+                dict_key = (function, frozenset(arguments.items()))
+                returns[dict_key] = await self.workshop.call(function, arguments)
+            except Exception as e:
+                print(e)
+                returns[tool_call] = "Error: Malformed function call"
+                debug(f"Further details: {tool_call} resulted in {e}")
         return returns
 
 
@@ -199,11 +205,7 @@ class Agent:
             steps += 1
 
             # invoke chat API
-            response_content, thinking_content, tool_calls = self.generate_and_stream_response(
-                #latest_user_query,
-                #agent_response = agent_response,
-                #tool_results = tool_results,
-            )
+            response_content, thinking_content, tool_calls = self.generate_and_stream_response()
             agent_response = {
                 'role': 'assistant',
                 'content': response_content,
@@ -219,7 +221,6 @@ class Agent:
                     try:
                         result = await self.call_tools(tool_call)
                         tool_results.update(result)
-                        print(f"-->{result}")
                     except Exception as e:
                         print(f"--> Error encountered: {e}")
                 tool_sequence.append(tool_results)
@@ -232,13 +233,14 @@ class Agent:
 
             # check termination condition
             match self.turn_termination_condition:
-                case TerminationCondition.INFERENCE_CALL_RETURNED:
+                case "inference_call_returned":
                     termination_condition_met = True
-                case TerminationCondition.TERMINATE_WHEN_NONEMPTY_RESPONSE_CONTENT:
+                case "nonempty_response_content":
                     termination_condition_met = bool(response_content)
-                case TerminationCondition.TERMINATE_WHEN_NO_FURTHER_TOOL_CALLS:
+                case "no_further_tool_calls":
                     termination_condition_met = (not tool_calls)
-                # TODO: handle SELF_DETERMINED_TERMINATION case
+                case "self_determined_termination":
+                    raise NotImplementedError("No self-determined termination for this flow.")
 
         final_tool_calls = tool_calls
         return response_content, final_tool_calls, steps, tool_sequence
@@ -247,27 +249,27 @@ class Agent:
 
     def generate_and_stream_response(
         self,
-        # user_prompt: str,
-        #agent_response: dict = {},
-        #tool_results: dict = {}
     ) -> tuple[str,str,list]:
         """Compile augmented context and generate a response to the user's latest query"""
-        response = self.model.generate_chat_response(
-            #self.model.extend_messages_with_tool_responses(
-            #    self.context.derive_extended_chat_history(user_prompt, agent_response),
-            #    tool_results
-            #),
-            self.context.derive_full_history(),
-            structured_output = self.context.structured_output,
-            tools = self.list_of_all_tools
-        )
+        try:
+            response = self.model.generate_chat_response(
+                self.context.derive_full_history(),
+                structured_output = self.context.structured_output,
+                tools = self.list_of_all_tools
+            )
+        except Exception as e:
+            error(f"\n\nERROR: call to generate_chat_response() failed with with the error: \n{e}")
+            response = iter([]) # dummy
         assert isinstance(response, Iterator)
         complete_response = self.io.stream_output(response)
-        assert isinstance(complete_response, ollama.ChatResponse)
-        response_content = cast(str, complete_response.message.content)
-        thinking_content = cast(str, complete_response.message.thinking)
-        tool_calls = cast(list, complete_response.message.tool_calls)
-        return response_content, thinking_content, tool_calls
+        if complete_response:
+            assert isinstance(complete_response, ollama.ChatResponse)
+            response_content = cast(str, complete_response.message.content)
+            thinking_content = cast(str, complete_response.message.thinking)
+            tool_calls = cast(list, complete_response.message.tool_calls)
+            return response_content, thinking_content, tool_calls
+        else:
+            return "", "", []
 
 
     async def chat(self) -> None:
@@ -291,21 +293,58 @@ class Agent:
 
 
 
+### CLI ENTRY POINT ###
 
+app = cyclopts.App(default_parameter=cyclopts.Parameter(consume_multiple=True))
+tool_args_group = cyclopts.Group(
+    "Selecting Tools (and MCP Servers) among ./tool_defs/*.py",
+    default_parameter=cyclopts.Parameter(negative=()),  # Disable "--no-" flags
+    validator=cyclopts.validators.LimitedChoice(),  # Mutually Exclusive Options
+)
 
-async def main():
-    #logging.getLogger('flat_mcp_client').setLevel(logging.DEBUG)
-    #model = OllamaModel()
-    agent = Agent(
-        turn_termination_condition = TerminationCondition.TERMINATE_WHEN_NO_FURTHER_TOOL_CALLS
-    )
-    await agent.init_workshop(tool_collections = ("geolocal_info", "crawl4ai"))
+def arg_was_set_by_user(argval: str):
+    """Convention: space and end of freeform parameter indicates *not* set by user"""
+    return argval[-1] != ' '
+
+@app.command
+async def chatloop(
+    provider: ModelProvider = "ollama",
+    endpoint: str = "http://localhost:11434 ", # space at end intentional
+    model: str = "qwen3:8b ", #"hf.co/Qwen/Qwen3-8B-GGUF:Q4_K_M ", #"gpt-oss:latest ",
+    tools: Annotated[
+        list[ExistingToolDefinitionNames], cyclopts.Parameter(group=tool_args_group)] = [], # type: ignore
+    all_tools: Annotated[bool, cyclopts.Parameter(group=tool_args_group)] = False,
+    turn_termination_condition: Annotated[
+        TerminationCondition, cyclopts.Parameter(
+            name=['--ttc'],
+            help = "Turn Termination Condition"
+        )] = "no_further_tool_calls",
+    max_inference_calls_per_turn: int = 10,
+    verbose: bool = False,
+):
+    if verbose:
+        logging.getLogger('flat_mcp_client').setLevel(logging.DEBUG)
+
+    kwargs = {
+        "model_provider": provider,
+        "turn_termination_condition": turn_termination_condition,
+        "max_inference_calls_per_turn": max_inference_calls_per_turn,
+    }
+
+    if arg_was_set_by_user(endpoint):
+        kwargs["model_endpoint"] = endpoint
+    if arg_was_set_by_user(model):
+        kwargs["model_name"] = model
+
+    print("\n\nInitializing agent...")
+    agent = Agent(**kwargs)
+    if(all_tools):
+        tools = get_args(ExistingToolDefinitionNames) # type: ignore
+    await agent.init_workshop(tool_collections = tools)
+    print("...initialization complete.\n")
     await agent.chat()
 
 
-def main_sync_entry_point():
-    asyncio.run(main())
-
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    app()

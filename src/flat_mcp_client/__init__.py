@@ -15,10 +15,15 @@ def debug(msg) -> None:
     package_logger.debug(msg)
 
 def warning(msg) -> None:
+    print("ERROR:")
+    print('\033[33m', end='') #red
     package_logger.warning(msg)
+    print('\033[0m', end='')
 
 def error(msg) -> None:
+    print('\033[31m', end='') # red
     package_logger.error(msg)
+    print('\033[0m', end='')
 
 def debug_pp(msg) -> None:
     package_logger.debug(msg)

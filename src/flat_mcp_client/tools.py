@@ -9,8 +9,8 @@ from mcp import Tool as MCPTool
 from fastmcp import Client
 
 
-from pydantic import BaseModel, Field
-from openai import OpenAI
+
+
 
 
 
@@ -180,10 +180,9 @@ class Workshop:
             self._toolbox_by_toolname[function_name] = tb
             self._tool_definitions[function_name] = tb.get_tool_definition(function_name)
 
-    async def setup_toolboxes(self, toolboxes : tuple):
+    async def setup_toolboxes(self, toolboxes: list[str]):
         """ prepare all necessary tools from a tuple of strings referencing to tool_definitions """
         for name in toolboxes:
-            print(name)
             tool_module = importlib.import_module(f"flat_mcp_client.tool_defs.{name}")
             tb = tool_module.toolbox
             if isinstance(tb, MCPToolbox):

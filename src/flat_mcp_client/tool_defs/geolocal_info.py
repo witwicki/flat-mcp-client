@@ -22,8 +22,8 @@ tools  = [
     {
         "type": "function",
         "function": {
-            "name": "get_nearest_city",
-            "description": "Get nearest town/city based on public IP address",
+            "name": "get_current_city",
+            "description": "Approximate town/city based on public IP address",
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -33,7 +33,7 @@ tools  = [
     {
         "type": "function",
         "function": {
-            "name": "weather_foreast_from_gps_coorinates",
+            "name": "weather_forecast_from_gps_coorinates",
             "description": "Get today's hourly weather forecast",
             "parameters": {
                 "type": "object",
@@ -120,7 +120,7 @@ class GeolocalInfoToolbox(Toolbox):
             }
 
     @classmethod
-    def get_nearest_city(cls):
+    def get_current_city(cls):
         """Get city, region name by querying ipify's API
         """
         data: dict = cls.get_ip_result()
@@ -133,7 +133,7 @@ class GeolocalInfoToolbox(Toolbox):
             return { "city": f"{data['city']}, {data['regionName']}" }
 
     @classmethod
-    def weather_foreast_from_gps_coorinates(cls, latitude: float, longitude: float) -> dict:
+    def weather_forecast_from_gps_coorinates(cls, latitude: float, longitude: float) -> dict:
         """Get hour-by-hour weather forecast by querying openmeteo
         with today's date and the desired location in <lat,lon> coordinates
         """
