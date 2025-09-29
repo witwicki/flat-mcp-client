@@ -1,4 +1,6 @@
 import time
+import os
+import atexit
 from enum import Enum
 import readline # allow input() to have a history
 from rich.console import Console
@@ -8,6 +10,13 @@ from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 from flat_mcp_client.models import OllamaModel, VLLMModel
 from flat_mcp_client import debug
 
+# Readline helper
+DIR = os.path.dirname(os.path.abspath(__file__))
+def maintain_realine_history(readline_history_path: str):
+    if os.path.exists(readline_history_path):
+        readline.read_history_file(readline_history_path)
+    readline.set_history_length(100)
+    atexit.register(readline.write_history_file, readline_history_path)
 
 # Modes and decorations
 class OutputDisplayMode(Enum):
@@ -26,10 +35,11 @@ class TerminalIO:
     with a few pretty decorations
     """
 
-    def __init__(self):
+    def __init__(self, readline_history_path: str = f"{DIR}/.terminal_input_history"):
         self.console = Console(record=True, highlight=False)
         self.console.style = OutputDisplayMode.SYSTEM.style
-        readline.clear_history()
+        # take care of readline history
+        maintain_realine_history(readline_history_path)
 
 
     def get_input(self) -> str:

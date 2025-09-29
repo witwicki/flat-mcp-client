@@ -1,5 +1,7 @@
 import sys
 import json
+import random
+import string
 from typing import Any, Literal, Annotated, cast, get_args
 from collections.abc import Iterator
 import importlib
@@ -8,14 +10,14 @@ import cyclopts
 
 import ollama
 
-from flat_mcp_client.models import OllamaModel, VLLMModel
+from flat_mcp_client.models import OllamaModel, VLLMModel, LlamaCppModel
 from flat_mcp_client.tools import Workshop
 from flat_mcp_client.tool_defs import ExistingToolDefinitionNames
 from flat_mcp_client.io.ui import HumanInterface
 from flat_mcp_client import debug, debug_pp, error
 
 # USEFUL STRING LITERALS
-ModelProvider = Literal["ollama", "vllm"]
+ModelProvider = Literal["ollama", "vllm", "llama.cpp"]
 TerminationCondition = Literal[
     "inference_call_completed",
     "nonempty_response_content",
@@ -23,7 +25,11 @@ TerminationCondition = Literal[
     "self_determined_termination"
 ]
 
-
+# HELPER FUNCTION
+def generate_random_id():
+    characters = string.ascii_letters + string.digits
+    result = ''.join(random.choice(characters) for _ in range(9))
+    return result
 
 class Context:
     """The acting prompt, structured-output defintions, and latest state information (e.g., chat history),
@@ -108,22 +114,30 @@ class Agent:
         model_provider: ModelProvider = "ollama",
         model_endpoint: str = "",
         model_name: str = "",
+        model_path: str = "",
         model_params: dict = {},
         prompt_name: str = "default",
         turn_termination_condition: TerminationCondition = "inference_call_completed",
         max_inference_calls_per_turn : int|None = None,
     ) -> None:
         # LLM particulars
-        kwargs : dict[str,Any] = { "params": model_params, }
-        if (model_name):
+        kwargs : dict[str,Any] = { "params": model_params}
+        # Pass {model_name, endpoint} parameters only if user has specified the non-default (non-empty) values
+        #  since Model (and offspring) classes themselves specify their own default values umbenounced to Agent()
+        if model_name:
             kwargs["model_name"] = model_name
-        if (model_endpoint):
+        if model_endpoint:
             kwargs["endpoint"] = model_endpoint
-        # TODO: move the if-else tree below to a static instantiate_model() function in models.py
+        if model_path and (model_provider != "llama.cpp"):
+            sys.exit("\nError: model-path can only be specified when selecting llama.cpp as the provider.\n\n")
+        # TODO: move the if-else tree below to a static instantiate_model() function in models.p
         if model_provider == "ollama":
             self.model = OllamaModel(**kwargs)
         elif model_provider == "vllm":
             self.model = VLLMModel(**kwargs)
+        elif model_provider == "llama.cpp":
+            kwargs["model_path"] = model_path
+            self.model = LlamaCppModel(**kwargs)
         else:
             raise Exception(f"Model provider {model_provider} is not a member of {list(ModelProvider)}!")
         # context
@@ -157,10 +171,11 @@ class Agent:
             try:
                 function = tool_call.function.name
                 arguments = tool_call.function.arguments
+                tool_call_id = getattr(tool_call, 'id', generate_random_id())
                 # accept arguments either as json string or dict
                 if isinstance(arguments, str):
                     arguments = json.loads(arguments)
-                dict_key = (function, frozenset(arguments.items()))
+                dict_key = (function, tool_call_id, frozenset(arguments.items()))
                 returns[dict_key] = await self.workshop.call(function, arguments)
             except Exception as e:
                 print(e)
@@ -311,6 +326,7 @@ async def chatloop(
     provider: ModelProvider = "ollama",
     endpoint: str = "http://localhost:11434 ", # space at end intentional
     model: str = "qwen3:8b ", #"hf.co/Qwen/Qwen3-8B-GGUF:Q4_K_M ", #"gpt-oss:latest ",
+    model_path: Annotated[str, cyclopts.Parameter(help = "Path to local gguf file, if using llama.cpp")] = "",
     tools: Annotated[
         list[ExistingToolDefinitionNames], cyclopts.Parameter(group=tool_args_group)] = [], # type: ignore
     all_tools: Annotated[bool, cyclopts.Parameter(group=tool_args_group)] = False,
@@ -327,6 +343,7 @@ async def chatloop(
 
     kwargs = {
         "model_provider": provider,
+        "model_path": model_path,
         "turn_termination_condition": turn_termination_condition,
         "max_inference_calls_per_turn": max_inference_calls_per_turn,
     }

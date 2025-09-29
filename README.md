@@ -1,5 +1,5 @@
 # flat-mcp-client
-*F*ast *L*ocal *A*gents with *T*ools (mcp-client edition) is a lightweight package for connecting local (self-hosted) LLMs to tooling+data and for prototyping agentic flows.  The philosophy behind this codebase is streamlined invocation of standard inferencing APIs (ollama, vllm via OpenAI interface compatibility) without relying on other agent frameworks!
+*F*ast *L*ocal *A*gents with *T*ools (mcp-client edition) is a lightweight package for connecting local (self-hosted) LLMs to tooling+data and for prototyping agentic flows.  The philosophy behind this codebase is streamlined invocation of standard inferencing APIs (ollama, vllm, llama.cpp via OpenAI interface compatibility) without relying on other agent frameworks!
 
 ## Quick start
 ```sh
@@ -20,7 +20,7 @@ MCP servers are prescribed in the same way that tools are.  See one example at `
 
 ## Additional Features
 
-- Streaming console output, including streaming of the tool calls made by LLMs served by vLLM
+- Streaming console output, including streaming of the tool calls made by LLMs served by vLLM and llama.cpp
 - Flexible agentic flow with one of several predefined turn termination conditions (e.g., `no further tool calls` will allow an agent to automatically chain tools and only stop once it has finished calling tools or a maximum number of inference calls has been reached)
 
 ## Wishlist
@@ -50,10 +50,12 @@ classDiagram
         class Model
         class OllamaModel
         class VLLMModel
+        class LlamaCppModel
     }
 
     Model <|-- OllamaModel : inherits
     Model <|-- VLLMModel : inherits
+    Model <|-- LlamaCppModel : inherits
 
     namespace tools.py {
         class Workshop

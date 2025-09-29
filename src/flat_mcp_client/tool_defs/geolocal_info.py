@@ -6,24 +6,26 @@ import requests_cache
 from flat_mcp_client.tools import Toolbox
 from flat_mcp_client import debug, debug_pp
 
+
+
 # TOOL DEFINITIONS
 tools  = [
     {
         "type": "function",
         "function": {
             "name": "estimate_gps_coordinates",
-            "description": "Approximates GPS coordinates from public IP address",
+            "description": "Approximates GPS coordinates of our current location",
             "parameters": {
                 "type": "object",
                 "properties": {},
             },
-        },
+        }
     },
     {
         "type": "function",
         "function": {
             "name": "get_current_city",
-            "description": "Approximate town/city based on public IP address",
+            "description": "Approximate the current town/city corresponding to our location",
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -33,8 +35,11 @@ tools  = [
     {
         "type": "function",
         "function": {
-            "name": "weather_forecast_from_gps_coorinates",
-            "description": "Get today's hourly weather forecast",
+            "name": "get_todays_weather_forecast",
+            "description": (
+                "Get today's hourly weather forecast by querying openmeteo with the"
+                " desired location in <lat,lon> coordinates"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -42,6 +47,25 @@ tools  = [
                     "longitude": {"type": "float", "description": "Current longitude"},
                 },
                 "required": ["latitude", "longitude"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_future_weather_forecast",
+            "description": (
+                "Get the future hour-by-hour weather forecast by querying openmeteo"
+                " with the date in YY-MM-DD format and the location in <lat,lon> coordinates"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "latitude": {"type": "float", "description": "Current latitude"},
+                    "longitude": {"type": "float", "description": "Current longitude"},
+                    "date": {"type": "str", "description": "forecasted date"},
+                },
+                "required": ["latitude", "longitude", "date"],
             },
         },
     },
@@ -133,9 +157,9 @@ class GeolocalInfoToolbox(Toolbox):
             return { "city": f"{data['city']}, {data['regionName']}" }
 
     @classmethod
-    def weather_forecast_from_gps_coorinates(cls, latitude: float, longitude: float) -> dict:
-        """Get hour-by-hour weather forecast by querying openmeteo
-        with today's date and the desired location in <lat,lon> coordinates
+    def get_todays_weather_forecast(cls, latitude: float, longitude: float) -> dict:
+        """Get today's hour-by-hour weather forecast by querying openmeteo
+        with the desired location in <lat,lon> coordinates
         """
         today = datetime.now().strftime("%Y-%m-%d")
         url = "https://api.open-meteo.com/v1/forecast"
@@ -153,7 +177,25 @@ class GeolocalInfoToolbox(Toolbox):
         result = response.json()
         return result["hourly"]
 
-
+    @classmethod
+    def get_future_weather_forecast(cls, latitude: float, longitude: float, date: str) -> dict:
+        """Get the future hour-by-hour weather forecast by querying openmeteo
+        with the date in YY-MM-DD format and the location in <lat,lon> coordinates
+        """
+        url = "https://api.open-meteo.com/v1/forecast"
+        params = {
+           	"latitude": latitude,
+           	"longitude": longitude,
+            "timezone": "auto",
+           	"hourly": ["temperature_2m", "cloud_cover_low", "cloud_cover_mid", "cloud_cover_high", "weather_code", "relative_humidity_2m", "precipitation_probability", "rain"],
+           	"temperature_unit": "fahrenheit",
+           	"precipitation_unit": "inch",
+           	"start_date": date,
+           	"end_date": date,
+        }
+        response = cls.openmeteocache_session.get(url, params=params)
+        result = response.json()
+        return result["hourly"]
 
 
 toolbox = GeolocalInfoToolbox("geolocal_info", tools)

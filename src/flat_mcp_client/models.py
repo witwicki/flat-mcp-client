@@ -8,6 +8,8 @@ import ollama
 from openai.types.chat import ChatCompletion
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 from openai import OpenAI
+import platformdirs
+import huggingface_hub
 from flat_mcp_client import debug, debug_pp
 
 
@@ -31,6 +33,28 @@ def remerge_chunked_tool_calls(tool_calls: list) -> None:
         i -= 1
 
 
+# helper function
+def find_gguf_filename(repo_id: str, quantization: str) -> str|None:
+    """
+    Finds the GGUF filename for a given quantization level in a Hugging Face repository.
+
+    Args:
+        repo_id (str): The repository ID, e.g., "TheBloke/Mixtral-8x7B-Instruct-v0.1-GGUF".
+        quantization (str): The desired quantization level, e.g., "Q4_K_M".
+
+    Returns:
+        str: The full GGUF filename, or None if not found.
+    """
+    fs = huggingface_hub.HfFileSystem()
+    files = fs.ls(repo_id, detail=False)
+
+    for filename in files:
+        # Check if the filename contains pattern indicating the quantization
+        if isinstance(filename, str):
+            if quantization.lower() in filename.lower():
+                return filename.split('/')[-1] # removing any path information
+    return None
+
 
 
 class Model(ABC):
@@ -38,20 +62,19 @@ class Model(ABC):
 
     def __init__(
         self,
-        provider: str,
         model_name: str, # Selected LLM model
         params: dict, # setting of non-default parameters to pass to llm provider
         endpoint: str = "http://localhost:11434", # ollama server endpoint
     ) -> None:
         self.model_name = model_name
         self.params = params
+        print(f"Spinning up {model_name} on {endpoint}...", end=' ')
         if self.is_model_served():
-            print(f"Loading {model_name} from {provider} endpoint {endpoint}...", end=' ')
             self.warm_up_model()
             print("done.")
         else:
             sys.exit((
-                f"ERROR: Model {self.model_name} is not being served at {endpoint}.  "
+                f"\nERROR: Model {self.model_name} is not being served at {endpoint}.  "
                 "Check that you have the correct endpoint and model name."
             ))
 
@@ -60,9 +83,14 @@ class Model(ABC):
     def is_model_served(self) -> bool:
         pass
 
-    @abstractmethod
     def warm_up_model(self) -> None:
-        pass
+        """Dummy inference call to trigger ollama to load model into memory"""
+        debug(f"Warming up {self.model_name}...")
+        response = self.generate_chat_response(
+            [ {"role": "user", "content": "Introduce yourself."} ],
+            stream = False,
+        )
+        debug(response)
 
     # todo: check that model supports tools
 
@@ -70,8 +98,9 @@ class Model(ABC):
     def generate_chat_response(
         self,
         messages: list,
-        structured_output,
-        tools: list
+        structured_output = None,
+        tools: list = [],
+        stream: bool = True,
     ) -> ollama.ChatResponse | Iterator[ollama.ChatResponse] | ChatCompletion:
         pass
 
@@ -94,10 +123,14 @@ class Model(ABC):
         tool_results: dict = {},
     ) -> list:
         for key, response in tool_results.items():
-            tool_name = key[0] # note: keys take the form of (tool_name, frozenset(arguments))
-            messages.append({'role': 'tool', 'content': str(response['content']), 'name': tool_name})
-            # TODO: set tool_call_id for llama models
-            # TODO: other tweaks for other model families, e.g., function insead of tool?
+            tool_name, tool_call_id, _ = key # note: keys take the form of (tool_name, id, frozenset(arguments))
+            messages.append({
+                'role': 'tool',
+                'tool_call_id': tool_call_id,
+                'name': tool_name,
+                'content': str(response['content']),
+            })
+            # TODO: tweaks for other model families, e.g., function insead of tool?
         return messages
 
 
@@ -111,6 +144,7 @@ class OllamaModel(Model):
         params: dict = {}, # setting of non-default parameters to pass to llm provider
         endpoint: str = "http://localhost:11434", # ollama server endpoint
     ) -> None:
+        print("Initializing Ollama client...")
         self.client = ollama.Client(host=endpoint)
         # param KEEP_ALIVE how long to keep models in memory
         self.keep_alive = "15m"
@@ -122,7 +156,7 @@ class OllamaModel(Model):
             self.thinking_enabled = params["thinking"]
         # TODO: handle remaining params
         # finish initializing, including model warmup
-        super().__init__("Ollama", model_name, params, endpoint)
+        super().__init__(model_name, params, endpoint)
 
 
     def is_model_served(self) -> bool:
@@ -132,16 +166,6 @@ class OllamaModel(Model):
             return True
         except Exception:
             return False
-
-
-    def warm_up_model(self) -> None:
-        """Dummy inference call to trigger ollama to load model into memory"""
-        debug(f"Warming up {self.model_name}...")
-        response = self.generate_chat_response(
-            [ {"role": "user", "content": "Introduce yourself."} ],
-            stream = False,
-        )
-        debug(response)
 
 
     def generate_chat_response(
@@ -191,8 +215,8 @@ class OllamaModel(Model):
 
 
 
-class VLLMModel(Model):
-    """vLLM-served Model"""
+class ModelServedWithOpenAICompatibleAPI(Model):
+    """for VLLM, Llama.cpp server, etc."""
 
     def __init__(
         self,
@@ -200,21 +224,21 @@ class VLLMModel(Model):
         params: dict = {}, # setting of non-default parameters to pass to llm provider
         endpoint: str = "http://localhost:8000/v1", # ollama server endpoint
     ) -> None:
+        print("Initializing openAI client...")
         self.client = OpenAI(
-                api_key="local",
-                base_url=endpoint,
-            )
+            api_key="nokey",
+            base_url=endpoint,
+        )
 
         # TODO: handle remaining params
         # finish initializing, including model warmup
-        super().__init__("vLLM", model_name, params, endpoint)
+        super().__init__(model_name, params, endpoint)
 
 
     def is_model_served(self) -> bool:
         """Sanity check that model is actually served"""
         try:
             models = self.client.models.list()
-            print(models)
             for model in models.data:
                 if model.id == self.model_name:
                     return True
@@ -224,20 +248,12 @@ class VLLMModel(Model):
             return False
 
 
-    def warm_up_model(self) -> None:
-        """Dummy inference call to trigger ollama to load model into memory"""
-        debug(f"Warming up {self.model_name}...")
-        response = self.generate_chat_response(
-            [ {"role": "user", "content": "Introduce yourself."} ]
-        )
-        debug(response)
-
-
     def generate_chat_response(
         self,
         messages: list,
         structured_output = None,
         tools: list = [],
+        stream: bool = True,
         prescribed_tool = None, #: ChatCompletionToolChoiceOptionParam | None = None,
     ): # -> ChatCompletion | list:
         """Standard chat-completion inference call"""
@@ -246,7 +262,8 @@ class VLLMModel(Model):
             "model": self.model_name,
             "messages": messages,
             "tools": tools,
-            "stream" : True,
+            "stream" : stream,
+            "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
         }
         if prescribed_tool:
             kwargs["tool_choice"] = prescribed_tool
@@ -264,9 +281,9 @@ class VLLMModel(Model):
 
         # translate the new chunk into an equivalent ollama ChatResponse object
         new_message = ollama.Message(role='assistant')
-        new_message.thinking = getattr(new_chunk.choices[0].delta, "reasoning_content", None)
-        new_message.content = getattr(new_chunk.choices[0].delta, "content", None)
-        new_message.tool_calls = getattr(new_chunk.choices[0].delta, "tool_calls", None)
+        new_message.thinking = getattr(new_chunk.choices[0].delta, "reasoning_content", "")
+        new_message.content = getattr(new_chunk.choices[0].delta, "content", "")
+        new_message.tool_calls = getattr(new_chunk.choices[0].delta, "tool_calls", [])
         # ensure that there remains a json string even in the absence of tool arguments
         if new_message.tool_calls and not new_message.tool_calls[0].function.arguments:
             new_message.tool_calls[0].function.arguments = "{}" # type: ignore
@@ -300,3 +317,48 @@ class VLLMModel(Model):
 
 
         return newly_accumulated_response, new_chunk_as_ollama_response
+
+
+
+class VLLMModel(ModelServedWithOpenAICompatibleAPI):
+    """Vllm-served model (simply uses vanilla v1 OpenAI API)"""
+
+    def __init__(
+        self,
+        model_name: str = "JunHowie/Qwen3-8B-GPTQ-Int4", # Selected LLM model
+        params: dict = {}, # setting of non-default parameters to pass to llm provider
+        endpoint: str = "http://localhost:8000/v1", # ollama server endpoint
+    ) -> None:
+        print("VLLM selected as provider...")
+        # TODO: handle remaining params
+        super().__init__(model_name, params, endpoint)
+
+
+
+class LlamaCppModel(ModelServedWithOpenAICompatibleAPI):
+    """Llamacpp-served Model"""
+
+    def __init__(
+        self,
+        model_name: str = "unsloth/Qwen3-8B-GGUF:Q4_K_XL", # "gpt-oss:latest", # Selected LLM model
+        params: dict = {}, # setting of non-default parameters to pass to llm provider
+        endpoint: str = "http://localhost:8080/v1", # ollama server endpoint
+        model_path: str | None = None,
+    ) -> None:
+        print("Llama.cpp selected as provider...")
+        # override model name with a name that llamacpp expects in order to reference the downloaded GGUF file
+        print(model_path)
+        gguf_path = model_path or ""
+        if not model_path:
+            split_model_name = model_name.split(":")
+            repo_name = split_model_name[0]
+            quant = f"-{split_model_name[1]}" if (len(split_model_name) == 2) else ""
+            author, name = repo_name.split("/")
+            basename = name.strip("-GGUF")
+            gguf_filename_hf = find_gguf_filename(repo_name, quant)
+            debug(f"Found filename on hungging face: {gguf_filename_hf}.")
+            gguf_filename = gguf_filename_hf or f"{basename}{quant}.gguf"
+            gguf_path = f"{platformdirs.user_cache_dir()}/llama.cpp/{author}_{basename}-GGUF_{gguf_filename}"
+
+        # TODO: handle remaining params
+        super().__init__(gguf_path, params, endpoint)
