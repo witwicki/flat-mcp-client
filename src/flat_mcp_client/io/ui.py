@@ -15,5 +15,5 @@ class HumanInterface:
     def get_user_input(self):
         return self.terminal.get_input()
 
-    def stream_output(self, response: Iterator[ollama.ChatResponse]) -> ollama.ChatResponse | None:
+    def stream_output(self, response: Iterator[ollama.ChatResponse]) -> tuple[ollama.ChatResponse|None, int, int]:
         return self.terminal.stream_output(response)

@@ -12,6 +12,8 @@ from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 from openai import OpenAI
 import platformdirs
 import huggingface_hub
+import atexit
+from flat_mcp_client.stats import ModelStats
 from flat_mcp_client import debug, debug_pp, info
 
 
@@ -92,7 +94,8 @@ class Model(ABC):
                 f"\nERROR: Model {self.model_name} is not being served at {endpoint}.  "
                 "Check that you have the correct endpoint and model name."
             ))
-
+        self.stats = ModelStats(model_metadata={"model_name": model_name, "params": params, "endpoint": endpoint, "minimize_thinking": minimize_thinking})
+        atexit.register(self.at_exit)
 
     @abstractmethod
     def is_model_served(self) -> bool:
@@ -117,12 +120,32 @@ class Model(ABC):
     ) -> ollama.ChatResponse | Iterator[ollama.ChatResponse] | ChatCompletion:
         pass
 
+
+    def record_stats(self, response: ollama.ChatResponse, time_to_first_token: int, time_to_first_nonthinking_token: int):
+        self.stats.append(
+            time_to_first_token = time_to_first_token/1_000_000_000,
+            time_to_first_nonthinking_token = time_to_first_nonthinking_token/1_000_000_000,
+            prompt_parsing_time = response["prompt_eval_duration"]/1_000_000_000,
+            generation_time = response["eval_duration"]/1_000_000_000,
+            response_time = response["total_duration"]/1_000_000_000,
+            num_input_tokens = response["prompt_eval_count"],
+            num_output_tokens = response["eval_count"],
+        )
+
+
+    def at_exit(self):
+        info(f"Computing overall inference stats for {self.model_name}...")
+        self.stats.compute()
+        info(pformat(self.stats.stats))
+
+
     @staticmethod
     @abstractmethod
     def accumulate_streaming_response_chunks(
         new_chunk,
         running_accumulation: ollama.ChatResponse | None = None,
-        time_consumed: float | None = None
+        time_consumed: int | None = None,
+        load_and_prompt_eval_duration: int = 0,
     ) -> tuple[ollama.ChatResponse, ollama.ChatResponse]:
         """This method takes new chunks in the model's native framework (e.g., openai)
         and returns an accumulated message in the ollama.ChatResponse format (for convenience)
@@ -210,7 +233,8 @@ class OllamaModel(Model):
     def accumulate_streaming_response_chunks(
         new_chunk: ollama.ChatResponse,
         running_accumulation: ollama.ChatResponse | None = None,
-        time_consumed: float | None = None
+        time_consumed: int | None = None,
+        load_and_prompt_eval_duration: int = 0,
     ) -> tuple[ollama.ChatResponse, ollama.ChatResponse]:
         """returns an accumulated message after receiving a streaming chunk, and the new chunk"""
         newly_accumulated_response: ollama.ChatResponse = copy.deepcopy(new_chunk)
@@ -311,7 +335,8 @@ class ModelServedWithOpenAICompatibleAPI(Model):
     def accumulate_streaming_response_chunks(
         new_chunk: ChatCompletionChunk,
         running_accumulation: ollama.ChatResponse | None = None,
-        time_consumed: float | None = None
+        time_consumed: int | None = None,
+        load_and_prompt_eval_duration: int = 0,
     ) -> tuple[ollama.ChatResponse, ollama.ChatResponse]:
         """returns an accumulated message after receiving a streaming chunk
         in Ollama's ChatResponse format (out of convenience given useful fields, e.g., "total_duration")
@@ -331,11 +356,12 @@ class ModelServedWithOpenAICompatibleAPI(Model):
             "message": new_message,
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000000-00:00")
         }
+        # include stats
+        kwargs["total_duration"] = time_consumed
+        kwargs["load_duration"] = 0
+        kwargs["prompt_eval_duration"] = load_and_prompt_eval_duration
         if time_consumed:
-            kwargs["total_duration"] = time_consumed
-            kwargs["load_duration"] = 0
-            kwargs["prompt_eval_duration"] = 0
-            kwargs["eval_duration"] = 0
+            kwargs["eval_duration"] = time_consumed - load_and_prompt_eval_duration
         #debug(f"new_chunk: {new_chunk}")
         if new_chunk.usage:
             kwargs["prompt_eval_count"] = new_chunk.usage.prompt_tokens

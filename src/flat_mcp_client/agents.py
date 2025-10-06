@@ -275,8 +275,12 @@ class Agent:
         except Exception as e:
             error(f"\n\nERROR: call to generate_chat_response() failed with with the error: \n{e}")
             response = iter([]) # dummy
-        assert isinstance(response, Iterator)
-        complete_response = self.io.stream_output(response)
+        assert response and isinstance(response, Iterator)
+        complete_response, time_to_first_token, time_to_first_nonthinking_token = self.io.stream_output(response)
+        if complete_response:
+            self.model.record_stats(complete_response, time_to_first_token, time_to_first_nonthinking_token)
+        debug("Chat Response Message:")
+        debug_pp(complete_response)
         if complete_response:
             assert isinstance(complete_response, ollama.ChatResponse)
             response_content = cast(str, complete_response.message.content)

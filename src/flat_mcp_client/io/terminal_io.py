@@ -116,13 +116,15 @@ class TerminalIO:
         return new_index
 
 
-    def stream_output(self, response: Iterator[ollama.ChatResponse]) -> ollama.ChatResponse | None:
+    def stream_output(self, response: Iterator[ollama.ChatResponse]) -> tuple[ollama.ChatResponse|None, int, int]:
         """Dispay the chat response on the terminal as it is received
         and return the complete message.
         """
         # record start inference time
         start_time = time.time()
         nanoseconds_consumed = 0
+        time_to_first_token = 0
+        time_to_first_nonthinking_token = 0
         # accumulate chunks, printing as we go...
         accumulated_response = None
         new_chunk = None
@@ -134,14 +136,21 @@ class TerminalIO:
         for chunk in response:
             # calculate time consumed
             nanoseconds_consumed = int(1_000_000_000 * (time.time() - start_time))
+            # time to first chunk
+            if time_to_first_token == 0:
+                time_to_first_token = nanoseconds_consumed
             # accumulate by calling the appropriate method for the type
             if isinstance(chunk, ollama.ChatResponse):
                 accumulated_response, new_chunk = OllamaModel.accumulate_streaming_response_chunks(
-                    chunk, running_accumulation = accumulated_response, time_consumed = nanoseconds_consumed
+                    chunk,
+                    running_accumulation = accumulated_response
                 )
             elif isinstance(chunk, ChatCompletionChunk):
                 accumulated_response, new_chunk = VLLMModel.accumulate_streaming_response_chunks(
-                    chunk, running_accumulation = accumulated_response, time_consumed = nanoseconds_consumed
+                    chunk,
+                    running_accumulation = accumulated_response,
+                    time_consumed = nanoseconds_consumed,
+                    load_and_prompt_eval_duration = time_to_first_token, # approximation (treating the first chunk generation time as 0 ns)
                 )
             else:
                 raise Exception(f"Encountered chunk type {type(chunk)} that we are not set up to handle.")
@@ -156,15 +165,18 @@ class TerminalIO:
                     self.console.print("\n<think>", end='')
                 self.console.print(new_chunk.message.thinking, end='')
             else:
+                meaningful_nonthinking_token_received = False
                 # close out thought section
                 if started_thinking and not finished_thinking:
                     self.console.print("</think>\n")
                     finished_thinking = True
                 # display remaining new contents
                 if new_chunk.message.content:
+                    meaningful_nonthinking_token_received = True
                     self.console.style = OutputDisplayMode.AGENT_CONTENT.style
                     self.console.print(new_chunk.message.content,end='')
                 if new_chunk.message.tool_calls:
+                    meaningful_nonthinking_token_received = True
                     self.console.style = OutputDisplayMode.AGENT_TOOLING.style
                     current_toolcall_index = self.update_console_with_latest_tool_calls(
                         current_toolcall_index,
@@ -176,11 +188,11 @@ class TerminalIO:
                     if isinstance(chunk, ChatCompletionChunk):
                         # TODO: why tool_calls index 0?
                         last_toolcall_chunk_args = new_chunk.message.tool_calls[0].function.arguments
+                # record time of first nonthinking token
+                if (time_to_first_nonthinking_token == 0) and meaningful_nonthinking_token_received:
+                    time_to_first_nonthinking_token = nanoseconds_consumed
         # print any last unprinted toolcall chunks
         if last_toolcall_chunk_args:
             self.display_partial_tool_call(None, last_toolcall_chunk_args, starting=False, finishing=True)
-        debug(accumulated_response)
-        # sanity check total duration
-        if accumulated_response:
-            debug(f"DURATION_COMPARISON: measured={nanoseconds_consumed} vs. ollama={accumulated_response.total_duration} vs. ollama_inference={accumulated_response.eval_duration}")
-        return accumulated_response
+            #debug(f"ToolCall(function=Function(name='{last_function.name}', arguments={last_function.arguments}))")
+        return accumulated_response, time_to_first_token, time_to_first_nonthinking_token
