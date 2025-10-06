@@ -14,7 +14,7 @@ from flat_mcp_client.models import OllamaModel, VLLMModel, LlamaCppModel
 from flat_mcp_client.tools import Workshop
 from flat_mcp_client.tool_defs import ExistingToolDefinitionNames
 from flat_mcp_client.io.ui import HumanInterface
-from flat_mcp_client import debug, debug_pp, error
+from flat_mcp_client import init_logger, info, debug, debug_pp, error
 
 # USEFUL STRING LITERALS
 ModelProvider = Literal["ollama", "vllm", "llama.cpp"]
@@ -97,9 +97,6 @@ class Context:
             }
         ]
         messages.extend(self.chat_history)
-        debug("~~~FULL HISTORY AS CONTEXT FOR NEXT INFERENCE CALL~~~")
-        debug_pp(messages)
-        debug("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
         return messages
 
 
@@ -179,7 +176,7 @@ class Agent:
                 dict_key = (function, tool_call_id, frozenset(arguments.items()))
                 returns[dict_key] = await self.workshop.call(function, arguments)
             except Exception as e:
-                print(e)
+                error(e)
                 returns[tool_call] = "Error: Malformed function call"
                 debug(f"Further details: {tool_call} resulted in {e}")
         return returns
@@ -240,7 +237,7 @@ class Agent:
                         result = await self.call_tools(tool_call)
                         tool_results.update(result)
                     except Exception as e:
-                        print(f"--> Error encountered: {e}")
+                        error(f"Error encountered: {e}")
                 tool_sequence.append(tool_results)
 
             # update chat history accordingly
@@ -342,8 +339,7 @@ async def chatloop(
     minimize_thinking: bool = False,
     debug: bool = False,
 ):
-    if debug:
-        logging.getLogger('flat_mcp_client').setLevel(logging.DEBUG)
+    init_logger(logging.DEBUG if debug else logging.WARNING)
 
     kwargs = {
         "model_provider": provider,
@@ -358,12 +354,12 @@ async def chatloop(
     if arg_was_set_by_user(model):
         kwargs["model_name"] = model
 
-    print("\n\nInitializing agent...")
+    info("\n\nInitializing agent...")
     agent = Agent(**kwargs)
     if(all_tools):
         tools = get_args(ExistingToolDefinitionNames) # type: ignore
     await agent.init_workshop(tool_collections = tools)
-    print("...initialization complete.\n")
+    info("...initialization complete.\n")
     await agent.chat()
 
 

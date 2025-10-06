@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.10"
 dependencies = [
+    "colorlog>=6.9.0",
     "cyclopts>=3.24.0",
     "fastmcp>=2.12.3",
     "geopy>=2.4.1",

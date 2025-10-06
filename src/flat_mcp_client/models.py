@@ -1,7 +1,8 @@
 import sys
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
+from pprint import pformat
 from typing import Literal
+from collections.abc import Iterator
 import copy
 import itertools
 import time
@@ -157,7 +158,7 @@ class OllamaModel(Model):
         endpoint: str = "http://localhost:11434", # ollama server endpoint
         minimize_thinking: bool = False,
     ) -> None:
-        print("Initializing Ollama client...")
+        info("Initializing Ollama client...")
         self.client = ollama.Client(host=endpoint)
         # param KEEP_ALIVE how long to keep models in memory
         self.keep_alive = "15m"
@@ -241,7 +242,7 @@ class ModelServedWithOpenAICompatibleAPI(Model):
         endpoint: str = "http://localhost:8000/v1", # ollama server endpoint
         minimize_thinking: bool = False,
     ) -> None:
-        print("Initializing openAI client...")
+        info("Initializing openAI client...")
         self.client = OpenAI(
             api_key="nokey",
             base_url=endpoint,
@@ -335,6 +336,7 @@ class ModelServedWithOpenAICompatibleAPI(Model):
             kwargs["load_duration"] = 0
             kwargs["prompt_eval_duration"] = 0
             kwargs["eval_duration"] = 0
+        #debug(f"new_chunk: {new_chunk}")
         if new_chunk.usage:
             kwargs["prompt_eval_count"] = new_chunk.usage.prompt_tokens
             kwargs["eval_count"] = new_chunk.usage.completion_tokens
@@ -370,7 +372,7 @@ class VLLMModel(ModelServedWithOpenAICompatibleAPI):
         endpoint: str = "http://localhost:8000/v1", # ollama server endpoint
         minimize_thinking: bool = False,
     ) -> None:
-        print("VLLM selected as provider...")
+        info("VLLM selected as provider...")
         # TODO: handle remaining params
         super().__init__(model_name, params, endpoint, minimize_thinking)
 
@@ -387,7 +389,7 @@ class LlamaCppModel(ModelServedWithOpenAICompatibleAPI):
         model_path: str | None = None,
         minimize_thinking: bool = False,
     ) -> None:
-        print("Llama.cpp selected as provider...")
+        info("Llama.cpp selected as provider...")
         # override model name with a name that llamacpp expects in order to reference the downloaded GGUF file
         gguf_path = model_path or ""
         if not model_path:

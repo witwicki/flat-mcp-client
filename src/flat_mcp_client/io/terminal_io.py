@@ -12,9 +12,13 @@ from flat_mcp_client import debug, warning
 
 # Readline helper
 DIR = os.path.dirname(os.path.abspath(__file__))
-def maintain_realine_history(readline_history_path: str):
+def maintain_readline_history(readline_history_path: str):
     if os.path.exists(readline_history_path):
-        readline.read_history_file(readline_history_path)
+        try:
+            readline.read_history_file(readline_history_path)
+        except Exception as e:
+            warning(f"readline failed to retrieve history! (error={e}).   Removing history file...")
+            os.remove(readline_history_path)
     readline.set_history_length(100)
     atexit.register(readline.write_history_file, readline_history_path)
 
@@ -39,7 +43,7 @@ class TerminalIO:
         self.console = Console(record=True, highlight=False)
         self.console.style = OutputDisplayMode.SYSTEM.style
         # take care of readline history
-        maintain_realine_history(readline_history_path)
+        maintain_readline_history(readline_history_path)
 
 
     def get_input(self) -> str:
@@ -47,6 +51,7 @@ class TerminalIO:
         print('\033[34m', end='')
         entry = input("▶ ")
         print('\033[0m', end='')
+        debug(f"User: {entry}")
         return entry
 
 
@@ -80,6 +85,7 @@ class TerminalIO:
             if chunk_origin_type == ollama.ChatResponse:
                 for toolcall in new_chunk.message.tool_calls:
                     self.console.print(f"\nToolCall({toolcall})")
+                    debug(f"\nToolCall({toolcall})")
             # whereas vllm may stream multiple chunks per tool call
             else:
                 # if we see a new tool call, print previous
@@ -96,6 +102,7 @@ class TerminalIO:
                             starting = False,
                             finishing = True,
                         )
+                        #debug(f"ToolCall(function=Function(name='{last_function.name}', arguments={last_function.arguments}))")
                 else:
                     # if not starting new call, take only the arguments of the latest chunk_origin_type
                     function = new_chunk.message.tool_calls[0].function
@@ -167,6 +174,7 @@ class TerminalIO:
                     )
                     # save this chunk to finish printing to console
                     if isinstance(chunk, ChatCompletionChunk):
+                        # TODO: why tool_calls index 0?
                         last_toolcall_chunk_args = new_chunk.message.tool_calls[0].function.arguments
         # print any last unprinted toolcall chunks
         if last_toolcall_chunk_args:
