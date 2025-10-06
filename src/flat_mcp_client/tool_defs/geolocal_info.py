@@ -43,8 +43,8 @@ tools  = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "latitude": {"type": "float", "description": "Current latitude"},
-                    "longitude": {"type": "float", "description": "Current longitude"},
+                    "latitude": {"type": "number", "description": "Current latitude"},
+                    "longitude": {"type": "number", "description": "Current longitude"},
                 },
                 "required": ["latitude", "longitude"],
             },
@@ -61,9 +61,9 @@ tools  = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "latitude": {"type": "float", "description": "Current latitude"},
-                    "longitude": {"type": "float", "description": "Current longitude"},
-                    "date": {"type": "str", "description": "forecasted date"},
+                    "latitude": {"type": "number", "description": "Current latitude"},
+                    "longitude": {"type": "number", "description": "Current longitude"},
+                    "date": {"type": "string", "description": "forecasted date"},
                 },
                 "required": ["latitude", "longitude", "date"],
             },

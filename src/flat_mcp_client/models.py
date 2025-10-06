@@ -1,6 +1,7 @@
 import sys
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
+from typing import Literal
 import copy
 import itertools
 import time
@@ -10,7 +11,7 @@ from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 from openai import OpenAI
 import platformdirs
 import huggingface_hub
-from flat_mcp_client import debug, debug_pp
+from flat_mcp_client import debug, debug_pp, info
 
 
 # helper function
@@ -52,8 +53,19 @@ def find_gguf_filename(repo_id: str, quantization: str) -> str|None:
         # Check if the filename contains pattern indicating the quantization
         if isinstance(filename, str):
             if quantization.lower() in filename.lower():
-                return filename.split('/')[-1] # removing any path information
+                if filename.lower().endswith(".gguf"):
+                    return filename.split('/')[-1] # removing any path information
     return None
+
+
+# helper function
+def default_thinking_value(model_name: str, minimize_thinking: bool) -> bool | Literal['low', 'medium', 'high']:
+    """Set the thinking parameter appropriately considering model name and possible minimize-thinking directive"""
+    if "gpt-oss" in model_name:
+        return 'low' if minimize_thinking else 'medium'
+    else:
+        return False if minimize_thinking else True
+
 
 
 
@@ -65,13 +77,15 @@ class Model(ABC):
         model_name: str, # Selected LLM model
         params: dict, # setting of non-default parameters to pass to llm provider
         endpoint: str = "http://localhost:11434", # ollama server endpoint
+        minimize_thinking: bool = False,
     ) -> None:
         self.model_name = model_name
         self.params = params
-        print(f"Spinning up {model_name} on {endpoint}...", end=' ')
+        self.minimize_thinking = minimize_thinking
+        info(f"Spinning up {model_name} on {endpoint}...")
         if self.is_model_served():
             self.warm_up_model()
-            print("done.")
+            info("...done.")
         else:
             sys.exit((
                 f"\nERROR: Model {self.model_name} is not being served at {endpoint}.  "
@@ -85,14 +99,11 @@ class Model(ABC):
 
     def warm_up_model(self) -> None:
         """Dummy inference call to trigger ollama to load model into memory"""
-        debug(f"Warming up {self.model_name}...")
         response = self.generate_chat_response(
             [ {"role": "user", "content": "Introduce yourself."} ],
             stream = False,
         )
         debug(response)
-
-    # todo: check that model supports tools
 
     @abstractmethod
     def generate_chat_response(
@@ -101,6 +112,7 @@ class Model(ABC):
         structured_output = None,
         tools: list = [],
         stream: bool = True,
+        thinking: bool | Literal['low', 'medium', 'high'] | None = None, # {low, medium, high} only supported by gpt-oss
     ) -> ollama.ChatResponse | Iterator[ollama.ChatResponse] | ChatCompletion:
         pass
 
@@ -143,6 +155,7 @@ class OllamaModel(Model):
         model_name: str = "qwen3:8b", # "gpt-oss:latest", # Selected LLM model
         params: dict = {}, # setting of non-default parameters to pass to llm provider
         endpoint: str = "http://localhost:11434", # ollama server endpoint
+        minimize_thinking: bool = False,
     ) -> None:
         print("Initializing Ollama client...")
         self.client = ollama.Client(host=endpoint)
@@ -150,13 +163,9 @@ class OllamaModel(Model):
         self.keep_alive = "15m"
         if "keep_alive" in params:
             self.keep_alive = params["keep_alive"]
-        # param THINKING_ENABLED whether or not to set 'thinking', though note that with gpt-oss thinking cannot be turned off
-        self.thinking_enabled = False
-        if "thinking" in params:
-            self.thinking_enabled = params["thinking"]
         # TODO: handle remaining params
         # finish initializing, including model warmup
-        super().__init__(model_name, params, endpoint)
+        super().__init__(model_name, params, endpoint, minimize_thinking)
 
 
     def is_model_served(self) -> bool:
@@ -174,18 +183,25 @@ class OllamaModel(Model):
         structured_output = None,
         tools: list = [],
         stream: bool = True,
+        thinking: bool | Literal['low', 'medium', 'high'] | None = None, # {low, medium, high} only supported by gpt-oss
+        max_context_length: int = 8912, #32768,
     ) -> ollama.ChatResponse | Iterator[ollama.ChatResponse]:
         """Standard chat-completion inference call"""
         debug("Inference call...")
-        debug(messages)
+        debug_pp(messages)
+
+        thinking_value = default_thinking_value(self.model_name, self.minimize_thinking)
+        if thinking != None:
+            thinking_value = thinking
+
         return self.client.chat(
             model=self.model_name,
             messages=messages,
             format=structured_output,
             keep_alive=self.keep_alive,
             tools=tools,
-            think=self.thinking_enabled,
-            stream=stream
+            think=thinking_value,
+            stream=stream,
         )
 
 
@@ -223,6 +239,7 @@ class ModelServedWithOpenAICompatibleAPI(Model):
         model_name: str = "JunHowie/Qwen3-8B-GPTQ-Int4", # Selected LLM model
         params: dict = {}, # setting of non-default parameters to pass to llm provider
         endpoint: str = "http://localhost:8000/v1", # ollama server endpoint
+        minimize_thinking: bool = False,
     ) -> None:
         print("Initializing openAI client...")
         self.client = OpenAI(
@@ -232,13 +249,14 @@ class ModelServedWithOpenAICompatibleAPI(Model):
 
         # TODO: handle remaining params
         # finish initializing, including model warmup
-        super().__init__(model_name, params, endpoint)
+        super().__init__(model_name, params, endpoint, minimize_thinking)
 
 
     def is_model_served(self) -> bool:
         """Sanity check that model is actually served"""
         try:
             models = self.client.models.list()
+            debug(f"Models served: {models}")
             for model in models.data:
                 if model.id == self.model_name:
                     return True
@@ -254,16 +272,33 @@ class ModelServedWithOpenAICompatibleAPI(Model):
         structured_output = None,
         tools: list = [],
         stream: bool = True,
-        prescribed_tool = None, #: ChatCompletionToolChoiceOptionParam | None = None,
+        thinking: bool | Literal['low', 'medium', 'high'] | None = None, # {low, medium, high} only supported by gpt-oss
+        prescribed_tool = None, #: ChatCompletionToolChoiceOptionParam | None = None, -> tool_choice
+        verbosity: Literal['low', 'medium', 'high'] | None = 'low', # for gptoss
+        # thinking (True/False for Qwen, or reasoning_effort for gptoss, which goes into sampling_params)
+        # response_format = json_schema ({ "type": "json_schema", "json_schema": {...} }) or json_object (A Pydantic model)
+        # # https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html#extra-parameters_1
+        # # https://platform.openai.com/docs/api-reference/chat/get
+        # # https://llama-cpp-python.readthedocs.io/en/latest/api-reference/#llama_cpp.Llama.create_chat_completion
     ): # -> ChatCompletion | list:
         """Standard chat-completion inference call"""
         debug("Inference call...")
+        thinking_value = default_thinking_value(self.model_name, self.minimize_thinking)
+        if thinking != None:
+            thinking_value = thinking
+        chat_template_kwargs = {
+            ("enable_thinking" if isinstance(thinking_value, bool) else "reasoning_effort"): thinking_value,
+        }
+        if verbosity:
+            chat_template_kwargs["verbosity"] = verbosity
         kwargs = {
             "model": self.model_name,
             "messages": messages,
             "tools": tools,
             "stream" : stream,
-            "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+            "stream_options" : {"include_usage": True} if stream else None,
+            "frequency_penalty": 1.0, # avoid repetition
+            "extra_body": {"chat_template_kwargs": chat_template_kwargs},
         }
         if prescribed_tool:
             kwargs["tool_choice"] = prescribed_tool
@@ -277,21 +312,23 @@ class ModelServedWithOpenAICompatibleAPI(Model):
         running_accumulation: ollama.ChatResponse | None = None,
         time_consumed: float | None = None
     ) -> tuple[ollama.ChatResponse, ollama.ChatResponse]:
-        """returns an accumulated message after receiving a streaming chunk"""
+        """returns an accumulated message after receiving a streaming chunk
+        in Ollama's ChatResponse format (out of convenience given useful fields, e.g., "total_duration")
+        """
 
         # translate the new chunk into an equivalent ollama ChatResponse object
         new_message = ollama.Message(role='assistant')
-        new_message.thinking = getattr(new_chunk.choices[0].delta, "reasoning_content", "")
-        new_message.content = getattr(new_chunk.choices[0].delta, "content", "")
-        new_message.tool_calls = getattr(new_chunk.choices[0].delta, "tool_calls", [])
-        # ensure that there remains a json string even in the absence of tool arguments
-        if new_message.tool_calls and not new_message.tool_calls[0].function.arguments:
-            new_message.tool_calls[0].function.arguments = "{}" # type: ignore
+        if new_chunk.choices:
+            new_message.thinking = getattr(new_chunk.choices[0].delta, "reasoning_content", "")
+            new_message.content = getattr(new_chunk.choices[0].delta, "content", "")
+            new_message.tool_calls = getattr(new_chunk.choices[0].delta, "tool_calls", [])
+            # ensure that there remains a json string even in the absence of tool arguments
+            if new_message.tool_calls and not new_message.tool_calls[0].function.arguments:
+                new_message.tool_calls[0].function.arguments = "{}" # type: ignore
         kwargs = {
             "model": f"{new_chunk.model}",
             "message": new_message,
-            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000000-00:00"),
-            "done": bool(new_chunk.choices[0].finish_reason),
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000000-00:00")
         }
         if time_consumed:
             kwargs["total_duration"] = time_consumed
@@ -301,12 +338,15 @@ class ModelServedWithOpenAICompatibleAPI(Model):
         if new_chunk.usage:
             kwargs["prompt_eval_count"] = new_chunk.usage.prompt_tokens
             kwargs["eval_count"] = new_chunk.usage.completion_tokens
+        # done (expected to be set for last chunk)
+        if new_chunk.choices:
+            kwargs["done"] = bool(new_chunk.choices[0].finish_reason or new_chunk.usage)
         new_chunk_as_ollama_response = ollama.ChatResponse(**kwargs)
 
         # simply accumulate using OllamaModel's staticmethod
         newly_accumulated_response, _ = OllamaModel.accumulate_streaming_response_chunks(
             new_chunk_as_ollama_response,
-            running_accumulation = running_accumulation
+            running_accumulation = running_accumulation,
         )
 
         # caveat: each tool calls streamed by vllm may get split up into into function-argument
@@ -328,10 +368,11 @@ class VLLMModel(ModelServedWithOpenAICompatibleAPI):
         model_name: str = "JunHowie/Qwen3-8B-GPTQ-Int4", # Selected LLM model
         params: dict = {}, # setting of non-default parameters to pass to llm provider
         endpoint: str = "http://localhost:8000/v1", # ollama server endpoint
+        minimize_thinking: bool = False,
     ) -> None:
         print("VLLM selected as provider...")
         # TODO: handle remaining params
-        super().__init__(model_name, params, endpoint)
+        super().__init__(model_name, params, endpoint, minimize_thinking)
 
 
 
@@ -344,21 +385,22 @@ class LlamaCppModel(ModelServedWithOpenAICompatibleAPI):
         params: dict = {}, # setting of non-default parameters to pass to llm provider
         endpoint: str = "http://localhost:8080/v1", # ollama server endpoint
         model_path: str | None = None,
+        minimize_thinking: bool = False,
     ) -> None:
         print("Llama.cpp selected as provider...")
         # override model name with a name that llamacpp expects in order to reference the downloaded GGUF file
-        print(model_path)
         gguf_path = model_path or ""
         if not model_path:
             split_model_name = model_name.split(":")
             repo_name = split_model_name[0]
             quant = f"-{split_model_name[1]}" if (len(split_model_name) == 2) else ""
+            debug(f"repo_name=[{repo_name}], quant=[{quant}]")
             author, name = repo_name.split("/")
             basename = name.strip("-GGUF")
             gguf_filename_hf = find_gguf_filename(repo_name, quant)
-            debug(f"Found filename on hungging face: {gguf_filename_hf}.")
+            debug(f"Found filename on hugging face: {gguf_filename_hf}.")
             gguf_filename = gguf_filename_hf or f"{basename}{quant}.gguf"
             gguf_path = f"{platformdirs.user_cache_dir()}/llama.cpp/{author}_{basename}-GGUF_{gguf_filename}"
 
         # TODO: handle remaining params
-        super().__init__(gguf_path, params, endpoint)
+        super().__init__(gguf_path, params, endpoint, minimize_thinking)

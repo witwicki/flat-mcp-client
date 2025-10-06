@@ -114,14 +114,15 @@ class Agent:
         model_provider: ModelProvider = "ollama",
         model_endpoint: str = "",
         model_name: str = "",
-        model_path: str = "",
+        model_path: str = "", # option to specify path to local file, causing model_name to be disregarded
         model_params: dict = {},
         prompt_name: str = "default",
+        minimize_thinking = False, # note: paramaters related to thinking/reasoning can be overridden in the chat flow
         turn_termination_condition: TerminationCondition = "inference_call_completed",
         max_inference_calls_per_turn : int|None = None,
     ) -> None:
         # LLM particulars
-        kwargs : dict[str,Any] = { "params": model_params}
+        kwargs : dict[str,Any] = { "params": model_params, "minimize_thinking": minimize_thinking }
         # Pass {model_name, endpoint} parameters only if user has specified the non-default (non-empty) values
         #  since Model (and offspring) classes themselves specify their own default values umbenounced to Agent()
         if model_name:
@@ -224,9 +225,11 @@ class Agent:
             agent_response = {
                 'role': 'assistant',
                 'content': response_content,
-                'reasoning_content': thinking_content,
                 'tool_calls': tool_calls,
             }
+            if thinking_content:
+                agent_response['reasoning_content'] = thinking_content
+
 
             # call tools selected by agent
             if tool_calls:
@@ -336,9 +339,10 @@ async def chatloop(
             help = "Turn Termination Condition"
         )] = "no_further_tool_calls",
     max_inference_calls_per_turn: int = 10,
-    verbose: bool = False,
+    minimize_thinking: bool = False,
+    debug: bool = False,
 ):
-    if verbose:
+    if debug:
         logging.getLogger('flat_mcp_client').setLevel(logging.DEBUG)
 
     kwargs = {
@@ -346,6 +350,7 @@ async def chatloop(
         "model_path": model_path,
         "turn_termination_condition": turn_termination_condition,
         "max_inference_calls_per_turn": max_inference_calls_per_turn,
+        "minimize_thinking": minimize_thinking,
     }
 
     if arg_was_set_by_user(endpoint):

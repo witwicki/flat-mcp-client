@@ -8,7 +8,7 @@ from collections.abc import Iterator
 import ollama
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 from flat_mcp_client.models import OllamaModel, VLLMModel
-from flat_mcp_client import debug
+from flat_mcp_client import debug, warning
 
 # Readline helper
 DIR = os.path.dirname(os.path.abspath(__file__))
@@ -141,7 +141,7 @@ class TerminalIO:
             # handle chunks (print and accumulate), expecting thinking to come first if at all
             if new_chunk.message.thinking:
                 if finished_thinking:
-                    print("WARNING: thinking chunk encountered after chunks of another type!")
+                    warning("TerminalIO.stream_output(): Thinking chunk encountered after chunks of another type!")
                 self.console.style = OutputDisplayMode.AGENT_THINKING.style
                 if not started_thinking:
                     # open thought section
