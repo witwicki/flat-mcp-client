@@ -4,12 +4,13 @@ from datetime import datetime
 import requests_cache
 
 from flat_mcp_client.tools import Toolbox
+from . import implements_tool
 from flat_mcp_client import debug, debug_pp
 
 
 
-# TOOL DEFINITIONS
-tools  = [
+# CUSTOM TOOL DEFINITIONS
+specific_tool_definitions  = [
     {
         "type": "function",
         "function": {
@@ -128,6 +129,7 @@ class GeolocalInfoToolbox(Toolbox):
                     return data
 
     @classmethod
+    @implements_tool
     def estimate_gps_coordinates(cls) -> dict:
         """Get {latitude, longitude} by querying ipify's API
         """
@@ -144,6 +146,7 @@ class GeolocalInfoToolbox(Toolbox):
             }
 
     @classmethod
+    @implements_tool
     def get_current_city(cls):
         """Get city, region name by querying ipify's API
         """
@@ -157,6 +160,7 @@ class GeolocalInfoToolbox(Toolbox):
             return { "city": f"{data['city']}, {data['regionName']}" }
 
     @classmethod
+    @implements_tool
     def get_todays_weather_forecast(cls, latitude: float, longitude: float) -> dict:
         """Get today's hour-by-hour weather forecast by querying openmeteo
         with the desired location in <lat,lon> coordinates
@@ -178,9 +182,15 @@ class GeolocalInfoToolbox(Toolbox):
         return result["hourly"]
 
     @classmethod
+    @implements_tool
     def get_future_weather_forecast(cls, latitude: float, longitude: float, date: str) -> dict:
         """Get the future hour-by-hour weather forecast by querying openmeteo
         with the date in YY-MM-DD format and the location in <lat,lon> coordinates
+
+        Args:
+            latitude: the latitude of the location
+            longitude: the longitude of the location
+            date: the date to forecast, in ISO format, e.g., 2030-04-15
         """
         url = "https://api.open-meteo.com/v1/forecast"
         params = {
@@ -196,6 +206,3 @@ class GeolocalInfoToolbox(Toolbox):
         response = cls.openmeteocache_session.get(url, params=params)
         result = response.json()
         return result["hourly"]
-
-
-toolbox = GeolocalInfoToolbox("geolocal_info", tools)

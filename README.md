@@ -43,8 +43,8 @@ uv run flat chatloop --help
 
 See `src/flat_mcp_client/tool_defs` for examples.
 
-Equipping your agents with additional tools is as simple as:
-1. adding the tools' pydantic descriptions and python functions to a new file in the `tool_defs` directory, e.g., `tool_defs/my_new_toolbox.py`
+Equipping your agents with an additional tool is as simple as:
+1. adding and decorating the tool's python implementation in a new file in the `tool_defs` directory, e.g., `tool_defs/my_new_toolbox.py`
 2. referenceing it when you start an agent chatloop, such as with `uv run flat chatloop --tools my_new_toolbox`
 
 ## MCP Servers

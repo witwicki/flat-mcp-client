@@ -8,16 +8,9 @@ from ollama import Tool
 from mcp import Tool as MCPTool
 from fastmcp import Client
 
-
-
-
-
-
-
-def get_function_arguments(func: Callable) -> str:
-    """Helper function to return a string of argument names for the given function."""
-    sig = inspect.signature(func)
-    return f"({', '.join(sig.parameters.keys())})"
+import os
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+import transformers.utils.chat_template_utils as transformers_utils
 
 
 
@@ -27,29 +20,54 @@ class Toolbox(ABC):
 
     To spin up a set of tools, create a child class, which will benefit from the
     inherited functionality of (1) automated registration of tool functions into
-    _registered_functions and (2) a common interface for calling the tools
-    via self.call().
+    _registered_functions by way of @implements_tool decorator, (2) automatic
+    derivation of json schemas with option to override with custom definition,
+    and (3) a common interface for calling the tools via self.call().
 
-    Caveat: This code currently assumes that tools are implemented by class methods
-    or static methods of the child class.  Use the @staticmethod / @classmethod
-    decorator accordingly when declaring tool functions.
-    TODO: relax this assumption
+    Note: Decorate all functions that implement tools with @implements_tool
     """
 
-    def __init__(self, id: str, tools: list[dict] = []) -> None:
-        # TODO: better typehint for tool definition than dict?
-        """Constructor that takes an id and, optionally, a tool list """
+    def __init__(self, id: str, custom_tool_definitions: list[dict] = []) -> None:
+        """Constructor that takes an id and, optionally, custom tool definitions for any or all tools """
         self.id : str = id
-        self._build_tool_dictionaries(tools)
+        self._build_tool_dictionaries(custom_tool_definitions)
 
-    def _build_tool_dictionaries(self, tools: list[dict]) -> None:
+    def _all_tool_functions(self) -> list[Callable]:
+        """Compose list of functions that implement tools"""
+        all = []
+        for name in dir(self):
+            attr = getattr(self, name)
+            if callable(attr) and hasattr(attr, '_is_tool_implemenation'):
+                all.append(attr)
+        return all
+
+    @staticmethod
+    def _derive_json_schema(func: Callable) -> dict:
+        """Compose tool definition from function metadata (including docstrings!)"""
+        return transformers_utils.get_json_schema(func)
+
+    @staticmethod
+    def _get_custom_schema(custom_tool_definitions: list[dict], tool_name: str) -> dict:
+        """Given a tool name, find its custom tool definition if one exists"""
+        for tool_definition in custom_tool_definitions:
+            name: str = tool_definition['function']['name']
+            if name == tool_name:
+                return tool_definition
+        return {}
+
+    def _build_tool_dictionaries(self, custom_tool_definitions: list[dict]) -> None:
         """Create mappings of tool names to specifications"""
-        self._tool_definitions : dict[str, dict] = {}
         self._registered_functions : dict[str, Callable] = {}
-        for tool in tools:
-            tool_name: str = tool['function']['name']
-            self._tool_definitions[tool_name] = tool
-            self._registered_functions[tool_name] = getattr(self, tool_name)
+        self._tool_definitions : dict[str, dict] = {}
+        # derive default definitions from decoated methods and trsnaformers_utils
+        for func in self._all_tool_functions():
+            tool_name: str = func.__name__
+            self._registered_functions[tool_name] = func
+            custom_definition = self._get_custom_schema(custom_tool_definitions, tool_name)
+            if custom_definition:
+                self._tool_definitions[tool_name] = custom_definition
+            else:
+                self._tool_definitions[tool_name] = self._derive_json_schema(func)
 
     def functions(self) -> dict[str, Callable]:
         """Get mapping of tool names to corresponding callable functions """
@@ -63,29 +81,22 @@ class Toolbox(ABC):
         """ look up definition of a given tool """
         return self._tool_definitions[toolname]
 
-    @classmethod
-    async def call_tool_as_class_function(cls, function_name: str, arguments: dict):
-        """ execute the tool call withouth passing in an extra argument self"""
-        try:
-            func = getattr(cls, function_name)
-            output = None
-            # if async coroutine, await it
-            if inspect.iscoroutinefunction(func):
-                output = await func(**arguments)
-            else:
-                output = func(**arguments)
-            return output
-        except Exception as e:
-            #traceback.print_exc()
-            return {"error": f"Error calling {function_name}: {str(e)}"}
-
     async def call(self, tool: str, arguments: dict) -> dict:
         """ Call a tool by the corresponding function name"""
         if tool not in self._registered_functions:
-            raise AttributeError(f"There is no tool {tool} in our {id} toolbox")
+            return {"error": f"There is no tool {tool} in our {id} toolbox"}
         else:
-            output = await self.call_tool_as_class_function(tool, arguments)
-            print(f"\033[90m--> output of tool call: {output}\033[0m")
+            func = getattr(self, tool)
+            output = None
+            try:
+                # if async coroutine, await it
+                if inspect.iscoroutinefunction(func):
+                    output = await func(**arguments)
+                else:
+                    output = func(**arguments)
+                    print(f"\033[90m--> output of tool call: {output}\033[0m")
+            except Exception as e:
+                return {"error": f"Error calling {tool}: {str(e)}"}
             return {"content": output}
 
     def __str__(self):
@@ -165,12 +176,20 @@ class Workshop:
         self._resource_inventory: dict[str, str] = {}
         self._tool_definitions : dict[str, dict] = {}
 
+
+    @staticmethod
+    def get_function_arguments(func: Callable) -> str:
+        """Helper function to return a string of argument names for the given function."""
+        sig = inspect.signature(func)
+        return f"({', '.join(sig.parameters.keys())})"
+
+
     def _add_toolbox(self, tb : Toolbox):
         """ associates tools with the right toolbox and tool definition """
         print(f"Adding toolbox: {tb.id}...")
         self._toolboxes.append(tb)
         for function_name in tb.functions():
-            print(f"\tfunction {function_name}{get_function_arguments(tb.get_function(function_name))}")
+            print(f"\tfunction {function_name}{self.get_function_arguments(tb.get_function(function_name))}")
             if function_name in self._toolboxes:
                 print(
                     f"\nWARNING: You are introducing a tool {function_name} from {tb.id} that is"
@@ -182,9 +201,11 @@ class Workshop:
 
     async def setup_toolboxes(self, toolboxes: list[str]):
         """ prepare all necessary tools from a tuple of strings referencing to tool_definitions """
+        from .tool_defs import create_toolbox
         for name in toolboxes:
-            tool_module = importlib.import_module(f"flat_mcp_client.tool_defs.{name}")
-            tb = tool_module.toolbox
+            tb = create_toolbox(name)
+            #tool_module = importlib.import_module(f"flat_mcp_client.tool_defs.{name}")
+            #tb = tool_module.toolbox
             if isinstance(tb, MCPToolbox):
                 await tb.prepare_mcp_tools()
                 # TODO: add associated resources to inventory
