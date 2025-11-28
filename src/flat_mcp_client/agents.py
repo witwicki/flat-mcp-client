@@ -35,24 +35,31 @@ class Context:
         """
         # lookup prompts and structured output specs
         self.prompt_name = prompt_name
-        self.load_system_prompt()
-        self.structured_output = None # TODO
+        self.load_system_prompt_and_structured_output()
         # initialize chat history
+        self.latest_user_prompt = ""
         self.chat_history = []
 
 
-    def load_system_prompt(self):
+    def load_system_prompt_and_structured_output(self):
         try:
             prompt_module = importlib.import_module(f"flat_mcp_client.prompts.{self.prompt_name}")
             self.system_prompt = getattr(prompt_module, "system_prompt")
+            self.structured_output = getattr(prompt_module, "structured_output", None)
         except:
+            traceback.print_exc()
             sys.exit(f"\nFailed to load `system_prompt` from prompts/{self.prompt_name}.py.  Did you specify your custom prompt correctly?\n")
 
 
-    def reload_system_prompt(self):
-        prompt_module = sys.modules[f"flat_mcp_client.prompts.{self.prompt_name}"]
+    def reload_system_prompt_and_structured_output(self, new_prompt_name: str = "") -> None:
+        """Reload, optionally from a different file"""
+        if new_prompt_name:
+            self.prompt_name = new_prompt_name
+        module_name = f"flat_mcp_client.prompts.{self.prompt_name}"
+        prompt_module = importlib.import_module(module_name)
         importlib.reload(prompt_module)
         self.system_prompt = getattr(prompt_module, "system_prompt")
+        self.structured_output = getattr(prompt_module, "structured_output", None)
 
 
     def derive_extended_chat_history(
@@ -274,9 +281,8 @@ class Agent:
 
             # AGENT'S TURN
             # reload system prompt (handy for live editing)
-            self.context.reload_system_prompt()
+            self.context.reload_system_prompt_and_structured_output()
             response_content, _, _, _ = await self.agentic_response(user_prompt)
-
         # TODO: write chat history to disk
 
 

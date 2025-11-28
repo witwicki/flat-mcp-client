@@ -290,14 +290,20 @@ class OllamaModel(Model):
         if thinking != None:
             thinking_value = thinking
 
+        # the ollama API expects structured output as a plain json schema
+        output_format = None
+        if structured_output:
+            output_format = just_json_schema(structured_output)
+            debug(f"output format = {output_format}")
         return self.client.chat(
             model=self.model_name,
             messages=messages,
-            format=structured_output,
+            format=output_format,
             keep_alive=self.keep_alive,
             tools=tools,
             think=thinking_value,
             stream=stream,
+            options = {"num_ctx": max_context_length}
         )
 
 
@@ -397,6 +403,9 @@ class ModelServedWithOpenAICompatibleAPI(Model):
             "frequency_penalty": 1.0, # avoid repetition
             "extra_body": {"chat_template_kwargs": chat_template_kwargs},
         }
+        if structured_output:
+            kwargs["response_format"] = structured_output
+            debug(f"output format = {structured_output}")
         if prescribed_tool:
             kwargs["tool_choice"] = prescribed_tool
         debug_pp(kwargs)

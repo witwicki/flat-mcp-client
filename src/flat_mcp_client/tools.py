@@ -153,8 +153,14 @@ class MCPToolbox(Toolbox):
                 raise AttributeError(f"There is no tool {tool} in our {id} toolbox")
             else:
                 async with self._mcp_client as client:
-                    output = await client.call_tool_mcp(tool, arguments)
-                    print(f"\033[90m--> output of tool call: {output}\033[0m")
+                    output = await client.call_tool(tool, arguments)
+                    if getattr(output, 'data') and output.data: # FastMCP style
+                        output = output.data
+                    elif getattr(output, 'structured_content') and output.structured_content:
+                        output = output.structured_content
+                    else:
+                        output = output.content[0].text # type: ignore
+                    print(f"\n\033[90m--> output of tool call: {output}\033[0m")
                     return {"content": output}
         except Exception as e:
             traceback.print_exc()
