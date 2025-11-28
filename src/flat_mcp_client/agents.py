@@ -141,18 +141,33 @@ class Agent:
         # turn termination condition
         self.turn_termination_condition = turn_termination_condition
         self.max_inference_calls_per_turn = max_inference_calls_per_turn
-
+        # tools (to be populated on call to init_workshop)
+        self.list_of_all_tools = []
         # interface
         self.io = HumanInterface()
 
 
     async def init_workshop(
         self,
+        mcp_servers: list[str] = [],
         tool_collections: list[str] = [],
         resources: list[str] = [],
+        tool_kwargs = {},
     ) -> None:
+        """Initialize workshop, made up of toolboxes and resources
+
+        Arguments:
+            - mcp_servers(list]) names mcp confgs by package name in `mcp_refs`
+            - tool_collections(list) names the toolboxes by package name in `tool_defs`
+            - resources(list) lists the resources available
+            - tool_kwargs(dict) optionally allow specifies arguments to be passed to tools
+        """
         self.workshop = Workshop()
-        await self.workshop.setup_toolboxes(tool_collections)
+        await self.workshop.setup_toolboxes(tool_collections, tool_kwargs)
+        await self.workshop.connect_with_mcp_servers(
+            mcp_servers,
+            self.served_llm,
+        )
         self.list_of_all_tools = self.workshop.list_of_all_tools()
         # todo: inventory resourcess
 
@@ -185,6 +200,7 @@ class Agent:
         agent_response: dict = {},
         tool_results: dict = {}
     ) -> None:
+        self.context.latest_user_prompt = user_prompt or ""
         updated_history = self.model.extend_messages_with_tool_responses(
             self.context.derive_extended_chat_history(user_prompt, agent_response),
             tool_results
@@ -195,13 +211,24 @@ class Agent:
     async def agentic_response(
         self,
         user_prompt: str | None,
+        overloaded_system_prompt_for_this_response: str | None = None,
         system_prompt_substitutions: dict[str,str] = {},
+        overloaded_structured_output_for_this_response: dict | None = None,
+        use_and_track_history_for_this_response: bool = True,
     ) -> tuple[str, list, int, list]:
         """Intended to be called for a single turn of conversation, this function allows agent to
         perform a series of inference calls before expressing a final response.
         """
-        # update chat history with user's latest prompt
-        self.update_chat_history(user_prompt = user_prompt)
+        # overload argument replaces original system prompt, but does not restore it afterwards
+        if overloaded_system_prompt_for_this_response:
+            self.context.system_prompt = overloaded_system_prompt_for_this_response
+        if overloaded_structured_output_for_this_response:
+            self.context.structured_output = overloaded_structured_output_for_this_response
+        # update chat history, or at minimum latest_user_prompt context variable, with user's latest prompt
+        if use_and_track_history_for_this_response:
+            self.update_chat_history(user_prompt = user_prompt)
+        else:
+            self.context.latest_user_prompt = user_prompt or ""
         # remember latest agent tool calls (+results), responses, and thinking contents
         tool_calls = []
         agent_response = {}
@@ -211,7 +238,6 @@ class Agent:
         thinking_content = ""
         termination_condition_met = False
         steps = 0
-        # TODO: account for information from prior turns
 
         while (
             (not termination_condition_met) and
@@ -222,6 +248,7 @@ class Agent:
             # invoke chat API
             response_content, thinking_content, tool_calls = self.generate_and_stream_response(
                 system_prompt_substitutions=system_prompt_substitutions,
+                use_history=use_and_track_history_for_this_response,
             )
             agent_response = {
                 'role': 'assistant',
@@ -231,10 +258,9 @@ class Agent:
             if thinking_content:
                 agent_response['reasoning_content'] = thinking_content
 
-
             # call tools selected by agent
+            tool_results = {}
             if tool_calls:
-                tool_results = {}
                 for tool_call in tool_calls:
                     pass
                     try:
@@ -243,16 +269,19 @@ class Agent:
                     except Exception as e:
                         error(f"Error encountered: {e}")
                 tool_sequence.append(tool_results)
+                debug("Tool Call Results:")
+                debug_pp(tool_sequence)
 
             # update chat history accordingly
-            self.update_chat_history(
-                agent_response = agent_response,
-                tool_results = tool_results,
-            )
+            if use_and_track_history_for_this_response:
+                self.update_chat_history(
+                    agent_response = agent_response,
+                    tool_results = tool_results,
+                )
 
             # check termination condition
             match self.turn_termination_condition:
-                case "inference_call_returned":
+                case "inference_call_completed":
                     termination_condition_met = True
                 case "nonempty_response_content":
                     termination_condition_met = bool(response_content)
@@ -285,17 +314,16 @@ class Agent:
                 tools = self.list_of_all_tools,
                 stream = True
             )
+            if isinstance(response, Iterator):
+                complete_response, time_to_first_token, time_to_first_nonthinking_token = self.io.stream_output(response, name=self.name)
+                self.model.record_stats(complete_response, time_to_first_token, time_to_first_nonthinking_token)
+                debug("Chat Response Message:")
+                debug_pp(complete_response)
         except Exception as e:
+            traceback.print_exc()
             error(f"\n\nERROR: call to generate_chat_response() failed with with the error: \n{e}")
             response = iter([]) # dummy
-        assert response and isinstance(response, Iterator)
-        complete_response, time_to_first_token, time_to_first_nonthinking_token = self.io.stream_output(response)
-        if complete_response:
-            self.model.record_stats(complete_response, time_to_first_token, time_to_first_nonthinking_token)
-        debug("Chat Response Message:")
-        debug_pp(complete_response)
-        if complete_response:
-            assert isinstance(complete_response, ollama.ChatResponse)
+        if isinstance(complete_response, ollama.ChatResponse):
             response_content = cast(str, complete_response.message.content)
             thinking_content = cast(str, complete_response.message.thinking)
             tool_calls = cast(list, complete_response.message.tool_calls)
@@ -327,8 +355,13 @@ class Agent:
 ### CLI ENTRY POINT ###
 
 app = cyclopts.App(default_parameter=cyclopts.Parameter(consume_multiple=True))
+mcp_args_group = cyclopts.Group(
+    "Selecting MCP servers among ./mcp_refs/*.py",
+    default_parameter=cyclopts.Parameter(negative=()),  # Disable "--no-" flags
+    validator=cyclopts.validators.LimitedChoice(),  # Mutually Exclusive Options
+)
 tool_args_group = cyclopts.Group(
-    "Selecting Tools (and MCP Servers) among ./tool_defs/*.py",
+    "Selecting non-mcp tools among ./tool_defs/*.py",
     default_parameter=cyclopts.Parameter(negative=()),  # Disable "--no-" flags
     validator=cyclopts.validators.LimitedChoice(),  # Mutually Exclusive Options
 )
@@ -347,6 +380,11 @@ async def chatloop(
     max_inference_calls_per_turn: int = 10,
     minimize_thinking: bool = False,
     debug: bool = False,
+    mcps: Annotated[list[ExistingMCPReferenceNames], cyclopts.Parameter(group=mcp_args_group)] = [], # type: ignore
+    all_mcps: Annotated[bool, cyclopts.Parameter(group=mcp_args_group)] = False,
+    tools: Annotated[
+        list[ExistingToolDefinitionNames], cyclopts.Parameter(group=tool_args_group)] = [], # type: ignore
+    all_tools: Annotated[bool, cyclopts.Parameter(group=tool_args_group)] = False,
 ):
     init_logger(logging.DEBUG if debug else logging.WARNING)
     """Create a chatloop, taking into account those arguments that were set by the user on the CLI
@@ -369,9 +407,14 @@ async def chatloop(
         "minimize_thinking": minimize_thinking,
     }
     agent = Agent(**kwargs)
+    if(all_mcps):
+        mcps = list(get_args(ExistingMCPReferenceNames))
     if(all_tools):
-        tools = get_args(ExistingToolDefinitionNames) # type: ignore
-    await agent.init_workshop(tool_collections = tools)
+        tools = list(get_args(ExistingToolDefinitionNames))
+    tool_kwargs = {
+        "llm": llm,
+    }
+    await agent.init_workshop(mcp_servers = mcps, tool_collections = tools, tool_kwargs = tool_kwargs)
     info("...initialization complete.\n")
     await agent.chat()
 

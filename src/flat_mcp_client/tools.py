@@ -1,17 +1,17 @@
 import inspect
-import importlib
 from typing import Callable
 from abc import ABC
 import traceback
 
 from ollama import Tool
 from mcp import Tool as MCPTool
-from fastmcp import Client
+import fastmcp
 
 import os
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 import transformers.utils.chat_template_utils as transformers_utils
 
+from .agent_helpers import ServedLLM
 
 
 class Toolbox(ABC):
@@ -27,7 +27,7 @@ class Toolbox(ABC):
     Note: Decorate all functions that implement tools with @implements_tool
     """
 
-    def __init__(self, id: str, custom_tool_definitions: list[dict] = []) -> None:
+    def __init__(self, id: str, custom_tool_definitions: list[dict] = [], **extra_kwargs) -> None:
         """Constructor that takes an id and, optionally, custom tool definitions for any or all tools """
         self.id : str = id
         self._build_tool_dictionaries(custom_tool_definitions)
@@ -96,6 +96,7 @@ class Toolbox(ABC):
                     output = func(**arguments)
                     print(f"\033[90m--> output of tool call: {output}\033[0m")
             except Exception as e:
+                traceback.print_exc()
                 return {"error": f"Error calling {tool}: {str(e)}"}
             return {"content": output}
 
@@ -117,9 +118,21 @@ class MCPToolbox(Toolbox):
 
     _registered_functions : dict[str, Callable] = {}
 
-    def __init__(self, id: str, mcp_config: dict):
+    def __init__(
+        self,
+        id: str,
+        mcp_config: dict,
+        fixed_sampling_params: dict = {},
+        default_llm_for_sampling: ServedLLM = ServedLLM(),
+    ) -> None:
         super().__init__(id)
-        self._mcp_client = Client(mcp_config)
+        from .sampling import LLMSampler
+        llm_sampler = LLMSampler(
+            id,
+            fixed_sampling_params = fixed_sampling_params,
+            default_llm = default_llm_for_sampling,
+        )
+        self._mcp_client = fastmcp.Client(mcp_config, sampling_handler=llm_sampler.sampling_handler)
 
     @staticmethod
     def derive_tool_definition(mcp_tool: MCPTool) -> dict:
@@ -133,11 +146,14 @@ class MCPToolbox(Toolbox):
             }
         }
 
-    async def prepare_mcp_tools(self):
+    async def prepare_mcp_tools(self, tool_subset: list[str]):
         """ query the mcp server for all of the pertinent tool details """
         async with self._mcp_client as client:
             mcp_tools = await client.list_tools()
             for mcp_tool in mcp_tools:
+                # if a nonempty subset is specified, use it as a filter
+                if tool_subset and (not mcp_tool.name in tool_subset):
+                    continue
                 # add to tool dictionary
                 self._tool_definitions[mcp_tool.name] = self.derive_tool_definition(mcp_tool)
                 # create wrapped function for function dictionary
@@ -205,17 +221,21 @@ class Workshop:
             self._toolbox_by_toolname[function_name] = tb
             self._tool_definitions[function_name] = tb.get_tool_definition(function_name)
 
-    async def setup_toolboxes(self, toolboxes: list[str]):
+    async def setup_toolboxes(self, toolboxes: list[str], tool_kwargs: dict) -> None:
         """ prepare all necessary tools from a tuple of strings referencing to tool_definitions """
         from .tool_defs import create_toolbox
         for name in toolboxes:
-            tb = create_toolbox(name)
-            #tool_module = importlib.import_module(f"flat_mcp_client.tool_defs.{name}")
-            #tb = tool_module.toolbox
-            if isinstance(tb, MCPToolbox):
-                await tb.prepare_mcp_tools()
-                # TODO: add associated resources to inventory
+            tb = create_toolbox(name, tool_kwargs)
             self._add_toolbox(tb)
+
+    async def connect_with_mcp_servers(self, mcp_servers: list[str], served_llm: ServedLLM) -> None:
+        """ add in tools and resources praovided by a dictionary of mcp serves mapped to subsets of item to include"""
+        from .mcp_refs import create_mcp_toolbox
+        for name in mcp_servers:
+            tb = await create_mcp_toolbox(name, served_llm)
+            if tb:
+                self._add_toolbox(tb)
+            # TODO: add associated resources to inventory
 
     def list_of_all_tools(self) -> list[dict]:
         """ ennumeration of tools from all sources """

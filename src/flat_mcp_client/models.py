@@ -232,11 +232,17 @@ class Model(ABC):
     ) -> list:
         for key, response in tool_results.items():
             tool_name, tool_call_id, _ = key # note: keys take the form of (tool_name, id, frozenset(arguments))
+            content = response.get('content')
+            if isinstance(content, dict):
+                content = json.dumps(content)
+            elif not isinstance(content, str):
+                raise AttributeError(f"Model.extend_messages_with_tool_responses() processing tool call result of unsupported type {type(content)}")
+            content_or_error: str = content or f"Error: {response.get('error')}" or "Unspecfied error occurred"
             messages.append({
                 'role': 'tool',
                 'tool_call_id': tool_call_id,
                 'name': tool_name,
-                'content': str(response['content']),
+                'content': content_or_error,
             })
             # TODO: tweaks for other model families, e.g., function insead of tool?
         return messages
