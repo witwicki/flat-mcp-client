@@ -3,7 +3,7 @@
 
 mcp_config = {
   "mcpServers": {
-    "web-search": {
+    "web-search-mcp": {
       "command": "node",
       "args": ["../../web-search-mcp/dist/index.js"],
       "env": {

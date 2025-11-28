@@ -49,7 +49,7 @@ Equipping your agents with an additional tool is as simple as:
 
 ## MCP Servers
 
-MCP servers are prescribed in the same way that tools are.  See one example at `src/flat_mcp_client/tool_defs/crawl4ai.py`
+MCP servers are prescribed in the same way that tools are.  See one example at `src/flat_mcp_client/tool_defs/web-search-mcp.py`
 
 ## Additional Features
 
@@ -57,6 +57,7 @@ MCP servers are prescribed in the same way that tools are.  See one example at `
 - Flexible agentic flow with one of several predefined turn termination conditions (e.g., `no further tool calls` will allow an agent to automatically chain tools and only stop once it has finished calling tools or a maximum number of inference calls has been reached)
 
 ## Wishlist
+- [x] MCP sampling
 - [ ] Support for MCP resources
 - [ ] Support for Tool Approvals and MCP Elicitations
 
