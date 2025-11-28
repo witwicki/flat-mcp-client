@@ -6,6 +6,9 @@ from collections.abc import Iterator
 import copy
 import itertools
 import time
+import json
+import os
+from pathlib import Path
 import ollama
 from openai.types.chat import ChatCompletion
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
@@ -44,7 +47,8 @@ def remerge_chunked_tool_calls(tool_calls: list) -> None:
 # helper function
 def find_gguf_filename(repo_id: str, quantization: str) -> str|None:
     """
-    Finds the GGUF filename for a given quantization level in a Hugging Face repository.
+    Finds the GGUF filename for a given quantization level in a Hugging Face repository, with local caching
+    to avoid redundant HF lookups.
 
     Args:
         repo_id (str): The repository ID, e.g., "TheBloke/Mixtral-8x7B-Instruct-v0.1-GGUF".
@@ -53,17 +57,42 @@ def find_gguf_filename(repo_id: str, quantization: str) -> str|None:
     Returns:
         str: The full GGUF filename, or None if not found.
     """
-    fs = huggingface_hub.HfFileSystem()
-    files = fs.ls(repo_id, detail=False)
+    gguf_filename = lookup_cached_gguf_filename(repo_id, quantization)
+    if gguf_filename:
+        debug(f"Retrieved filename from cache: {gguf_filename}.")
+    else:
+        fs = huggingface_hub.HfFileSystem()
+        files = fs.ls(repo_id, detail=False)
+        for filename in files:
+            # Check if the filename contains pattern indicating the quantization
+            if isinstance(filename, str):
+                if quantization.lower() in filename.lower():
+                    if filename.lower().endswith(".gguf"):
+                        gguf_filename = filename.split('/')[-1] # removing any path information
+                        debug(f"Found filename on hugging face: {gguf_filename}.")
+                        cache_gguf_filename(repo_id, quantization, gguf_filename)
+    return gguf_filename
 
-    for filename in files:
-        # Check if the filename contains pattern indicating the quantization
-        if isinstance(filename, str):
-            if quantization.lower() in filename.lower():
-                if filename.lower().endswith(".gguf"):
-                    return filename.split('/')[-1] # removing any path information
-    return None
+# helper function
+def lookup_cached_gguf_filename(repo_id: str, quantization: str) -> str|None:
+    cache_file = f"{Path(__file__).resolve().parent.parent.parent}/.gguf_reference_cache"
+    if os.path.exists(cache_file):
+        with open(cache_file, 'r') as file:
+            cache = json.load(file)
+            debug(f"gguf_reference_cache=\n{cache}")
+            result = get_deep_value(cache, repo_id, quantization)
+            return result
 
+# helper function
+def cache_gguf_filename(repo_id: str, quantization: str, result: str) -> None:
+    cache = {}
+    cache_file = f"{Path(__file__).resolve().parent.parent.parent}/.gguf_reference_cache"
+    if os.path.exists(cache_file):
+        with open(cache_file, 'r') as file:
+            cache = json.load(file)
+    set_deep_value(cache, result, repo_id, quantization)
+    with open(cache_file, 'w') as json_file:
+        json.dump(cache, json_file, indent=2)
 
 # helper function
 def default_thinking_value(model_name: str, minimize_thinking: bool) -> bool | Literal['low', 'medium', 'high']:
