@@ -1,35 +1,22 @@
 import sys
 import json
-import random
-import string
-from typing import Any, Literal, Annotated, cast, get_args
+from typing import Any, Optional, Annotated, cast, get_args
 from collections.abc import Iterator
 import importlib
 import logging
 import cyclopts
+import traceback
 
 import ollama
 
-from flat_mcp_client.models import OllamaModel, VLLMModel, LlamaCppModel
-from flat_mcp_client.tools import Workshop
-from flat_mcp_client.tool_defs import ExistingToolDefinitionNames
-from flat_mcp_client.io.ui import HumanInterface
-from flat_mcp_client import init_logger, info, debug, debug_pp, error
+from .models import Model
+from .tools import Workshop
+from .tool_defs import ExistingToolDefinitionNames
+from .mcp_refs import ExistingMCPReferenceNames
+from .io.ui import HumanInterface
+from .agent_helpers import ModelProvider, TerminationCondition, ServedLLM, generate_random_id
+from . import init_logger, info, debug, debug_pp, error
 
-# USEFUL STRING LITERALS
-ModelProvider = Literal["ollama", "vllm", "llama.cpp"]
-TerminationCondition = Literal[
-    "inference_call_completed",
-    "nonempty_response_content",
-    "no_further_tool_calls",
-    "self_determined_termination"
-]
-
-# HELPER FUNCTION
-def generate_random_id():
-    characters = string.ascii_letters + string.digits
-    result = ''.join(random.choice(characters) for _ in range(9))
-    return result
 
 class Context:
     """The acting prompt, structured-output defintions, and latest state information (e.g., chat history),
@@ -48,24 +35,31 @@ class Context:
         """
         # lookup prompts and structured output specs
         self.prompt_name = prompt_name
-        self.load_system_prompt()
-        self.structured_output = None # TODO
+        self.load_system_prompt_and_structured_output()
         # initialize chat history
+        self.latest_user_prompt = ""
         self.chat_history = []
 
 
-    def load_system_prompt(self):
+    def load_system_prompt_and_structured_output(self):
         try:
             prompt_module = importlib.import_module(f"flat_mcp_client.prompts.{self.prompt_name}")
             self.system_prompt = getattr(prompt_module, "system_prompt")
+            self.structured_output = getattr(prompt_module, "structured_output", None)
         except:
+            traceback.print_exc()
             sys.exit(f"\nFailed to load `system_prompt` from prompts/{self.prompt_name}.py.  Did you specify your custom prompt correctly?\n")
 
 
-    def reload_system_prompt(self):
-        prompt_module = sys.modules[f"flat_mcp_client.prompts.{self.prompt_name}"]
+    def reload_system_prompt_and_structured_output(self, new_prompt_name: str = "") -> None:
+        """Reload, optionally from a different file"""
+        if new_prompt_name:
+            self.prompt_name = new_prompt_name
+        module_name = f"flat_mcp_client.prompts.{self.prompt_name}"
+        prompt_module = importlib.import_module(module_name)
         importlib.reload(prompt_module)
         self.system_prompt = getattr(prompt_module, "system_prompt")
+        self.structured_output = getattr(prompt_module, "structured_output", None)
 
 
     def derive_extended_chat_history(
@@ -86,17 +80,38 @@ class Context:
             return messages
 
 
-    def derive_full_history(self) -> list:
-        """System prompt + chat history
-        """
+    def derive_full_history(self, system_prompt_substitutions: dict = {}) -> list:
+        """System prompt + chat history"""
         # system prompt...
         messages = [
             {
                 "role": "system",
-                "content": self.system_prompt,
+                "content": self.system_prompt.format(**system_prompt_substitutions),
             }
         ]
         messages.extend(self.chat_history)
+        return messages
+
+
+    def system_plus_user_prompt(self, system_prompt_substitutions: dict = {}) -> list:
+        """System prompt + latest user prompt"""
+        system_prompt = self.system_prompt
+        if system_prompt_substitutions:
+            system_prompt = self.system_prompt.format(**system_prompt_substitutions)
+
+        messages = [
+            {
+                "role": "system",
+                "content": system_prompt,
+            },
+        ]
+        if self.latest_user_prompt:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": self.latest_user_prompt,
+                }
+            )
         return messages
 
 
@@ -108,53 +123,51 @@ class Agent:
 
     def __init__(
         self,
-        model_provider: ModelProvider = "ollama",
-        model_endpoint: str = "",
-        model_name: str = "",
-        model_path: str = "", # option to specify path to local file, causing model_name to be disregarded
+        name: str = "agent_zero",
+        llm: ServedLLM = ServedLLM(),
         model_params: dict = {},
-        prompt_name: str = "default",
         minimize_thinking = False, # note: paramaters related to thinking/reasoning can be overridden in the chat flow
+        prompt_name: str = "default",
         turn_termination_condition: TerminationCondition = "inference_call_completed",
         max_inference_calls_per_turn : int|None = None,
     ) -> None:
-        # LLM particulars
-        kwargs : dict[str,Any] = { "params": model_params, "minimize_thinking": minimize_thinking }
-        # Pass {model_name, endpoint} parameters only if user has specified the non-default (non-empty) values
-        #  since Model (and offspring) classes themselves specify their own default values umbenounced to Agent()
-        if model_name:
-            kwargs["model_name"] = model_name
-        if model_endpoint:
-            kwargs["endpoint"] = model_endpoint
-        if model_path and (model_provider != "llama.cpp"):
-            sys.exit("\nError: model-path can only be specified when selecting llama.cpp as the provider.\n\n")
-        # TODO: move the if-else tree below to a static instantiate_model() function in models.p
-        if model_provider == "ollama":
-            self.model = OllamaModel(**kwargs)
-        elif model_provider == "vllm":
-            self.model = VLLMModel(**kwargs)
-        elif model_provider == "llama.cpp":
-            kwargs["model_path"] = model_path
-            self.model = LlamaCppModel(**kwargs)
-        else:
-            raise Exception(f"Model provider {model_provider} is not a member of {list(ModelProvider)}!")
+        """Initializer that side-effects the ServedLLM object (llm), specifically filling in the unset default elements"""
+        self.name = name
+        # instantiate model
+        self.model = Model.create(llm, model_params, minimize_thinking)
+        self.served_llm = llm
         # context
         self.context = Context(prompt_name)
         # turn termination condition
         self.turn_termination_condition = turn_termination_condition
         self.max_inference_calls_per_turn = max_inference_calls_per_turn
-
+        # tools (to be populated on call to init_workshop)
+        self.list_of_all_tools = []
         # interface
         self.io = HumanInterface()
 
 
     async def init_workshop(
         self,
+        mcp_servers: list[str] = [],
         tool_collections: list[str] = [],
         resources: list[str] = [],
+        tool_kwargs = {},
     ) -> None:
+        """Initialize workshop, made up of toolboxes and resources
+
+        Arguments:
+            - mcp_servers(list]) names mcp confgs by package name in `mcp_refs`
+            - tool_collections(list) names the toolboxes by package name in `tool_defs`
+            - resources(list) lists the resources available
+            - tool_kwargs(dict) optionally allow specifies arguments to be passed to tools
+        """
         self.workshop = Workshop()
-        await self.workshop.setup_toolboxes(tool_collections)
+        await self.workshop.setup_toolboxes(tool_collections, tool_kwargs)
+        await self.workshop.connect_with_mcp_servers(
+            mcp_servers,
+            self.served_llm,
+        )
         self.list_of_all_tools = self.workshop.list_of_all_tools()
         # todo: inventory resourcess
 
@@ -187,6 +200,7 @@ class Agent:
         agent_response: dict = {},
         tool_results: dict = {}
     ) -> None:
+        self.context.latest_user_prompt = user_prompt or ""
         updated_history = self.model.extend_messages_with_tool_responses(
             self.context.derive_extended_chat_history(user_prompt, agent_response),
             tool_results
@@ -194,12 +208,27 @@ class Agent:
         self.context.chat_history = updated_history
 
 
-    async def agentic_response(self, user_prompt: str | None) -> tuple[str, list, int, list]:
+    async def agentic_response(
+        self,
+        user_prompt: str | None,
+        overloaded_system_prompt_for_this_response: str | None = None,
+        system_prompt_substitutions: dict[str,str] = {},
+        overloaded_structured_output_for_this_response: dict | None = None,
+        use_and_track_history_for_this_response: bool = True,
+    ) -> tuple[str, list, int, list]:
         """Intended to be called for a single turn of conversation, this function allows agent to
         perform a series of inference calls before expressing a final response.
         """
-        # update chat history with user's latest prompt
-        self.update_chat_history(user_prompt = user_prompt)
+        # overload argument replaces original system prompt, but does not restore it afterwards
+        if overloaded_system_prompt_for_this_response:
+            self.context.system_prompt = overloaded_system_prompt_for_this_response
+        if overloaded_structured_output_for_this_response:
+            self.context.structured_output = overloaded_structured_output_for_this_response
+        # update chat history, or at minimum latest_user_prompt context variable, with user's latest prompt
+        if use_and_track_history_for_this_response:
+            self.update_chat_history(user_prompt = user_prompt)
+        else:
+            self.context.latest_user_prompt = user_prompt or ""
         # remember latest agent tool calls (+results), responses, and thinking contents
         tool_calls = []
         agent_response = {}
@@ -209,7 +238,6 @@ class Agent:
         thinking_content = ""
         termination_condition_met = False
         steps = 0
-        # TODO: account for information from prior turns
 
         while (
             (not termination_condition_met) and
@@ -218,7 +246,10 @@ class Agent:
             steps += 1
 
             # invoke chat API
-            response_content, thinking_content, tool_calls = self.generate_and_stream_response()
+            response_content, thinking_content, tool_calls = self.generate_and_stream_response(
+                system_prompt_substitutions=system_prompt_substitutions,
+                use_history=use_and_track_history_for_this_response,
+            )
             agent_response = {
                 'role': 'assistant',
                 'content': response_content,
@@ -227,10 +258,9 @@ class Agent:
             if thinking_content:
                 agent_response['reasoning_content'] = thinking_content
 
-
             # call tools selected by agent
+            tool_results = {}
             if tool_calls:
-                tool_results = {}
                 for tool_call in tool_calls:
                     pass
                     try:
@@ -239,16 +269,19 @@ class Agent:
                     except Exception as e:
                         error(f"Error encountered: {e}")
                 tool_sequence.append(tool_results)
+                debug("Tool Call Results:")
+                debug_pp(tool_sequence)
 
             # update chat history accordingly
-            self.update_chat_history(
-                agent_response = agent_response,
-                tool_results = tool_results,
-            )
+            if use_and_track_history_for_this_response:
+                self.update_chat_history(
+                    agent_response = agent_response,
+                    tool_results = tool_results,
+                )
 
             # check termination condition
             match self.turn_termination_condition:
-                case "inference_call_returned":
+                case "inference_call_completed":
                     termination_condition_met = True
                 case "nonempty_response_content":
                     termination_condition_met = bool(response_content)
@@ -264,25 +297,33 @@ class Agent:
 
     def generate_and_stream_response(
         self,
+        use_history: bool = True,
+        system_prompt_substitutions: dict[str,str] = {}
     ) -> tuple[str,str,list]:
         """Compile augmented context and generate a response to the user's latest query"""
+        context_messages = []
+        complete_response = None
+        if use_history:
+            context_messages = self.context.derive_full_history(system_prompt_substitutions)
+        else:
+            context_messages = self.context.system_plus_user_prompt(system_prompt_substitutions)
         try:
             response = self.model.generate_chat_response(
-                self.context.derive_full_history(),
+                context_messages,
                 structured_output = self.context.structured_output,
-                tools = self.list_of_all_tools
+                tools = self.list_of_all_tools,
+                stream = True
             )
+            if isinstance(response, Iterator):
+                complete_response, time_to_first_token, time_to_first_nonthinking_token = self.io.stream_output(response, name=self.name)
+                self.model.record_stats(complete_response, time_to_first_token, time_to_first_nonthinking_token)
+                debug("Chat Response Message:")
+                debug_pp(complete_response)
         except Exception as e:
+            traceback.print_exc()
             error(f"\n\nERROR: call to generate_chat_response() failed with with the error: \n{e}")
             response = iter([]) # dummy
-        assert response and isinstance(response, Iterator)
-        complete_response, time_to_first_token, time_to_first_nonthinking_token = self.io.stream_output(response)
-        if complete_response:
-            self.model.record_stats(complete_response, time_to_first_token, time_to_first_nonthinking_token)
-        debug("Chat Response Message:")
-        debug_pp(complete_response)
-        if complete_response:
-            assert isinstance(complete_response, ollama.ChatResponse)
+        if isinstance(complete_response, ollama.ChatResponse):
             response_content = cast(str, complete_response.message.content)
             thinking_content = cast(str, complete_response.message.thinking)
             tool_calls = cast(list, complete_response.message.tool_calls)
@@ -304,9 +345,8 @@ class Agent:
 
             # AGENT'S TURN
             # reload system prompt (handy for live editing)
-            self.context.reload_system_prompt()
+            self.context.reload_system_prompt_and_structured_output()
             response_content, _, _, _ = await self.agentic_response(user_prompt)
-
         # TODO: write chat history to disk
 
 
@@ -315,25 +355,23 @@ class Agent:
 ### CLI ENTRY POINT ###
 
 app = cyclopts.App(default_parameter=cyclopts.Parameter(consume_multiple=True))
+mcp_args_group = cyclopts.Group(
+    "Selecting MCP servers among ./mcp_refs/*.py",
+    default_parameter=cyclopts.Parameter(negative=()),  # Disable "--no-" flags
+    validator=cyclopts.validators.LimitedChoice(),  # Mutually Exclusive Options
+)
 tool_args_group = cyclopts.Group(
-    "Selecting Tools (and MCP Servers) among ./tool_defs/*.py",
+    "Selecting non-mcp tools among ./tool_defs/*.py",
     default_parameter=cyclopts.Parameter(negative=()),  # Disable "--no-" flags
     validator=cyclopts.validators.LimitedChoice(),  # Mutually Exclusive Options
 )
 
-def arg_was_set_by_user(argval: str):
-    """Convention: space and end of freeform parameter indicates *not* set by user"""
-    return argval[-1] != ' '
-
 @app.command
 async def chatloop(
-    provider: ModelProvider = "ollama",
-    endpoint: str = "http://localhost:11434 ", # space at end intentional
-    model: str = "qwen3:8b ", #"hf.co/Qwen/Qwen3-8B-GGUF:Q4_K_M ", #"gpt-oss:latest ",
-    model_path: Annotated[str, cyclopts.Parameter(help = "Path to local gguf file, if using llama.cpp")] = "",
-    tools: Annotated[
-        list[ExistingToolDefinitionNames], cyclopts.Parameter(group=tool_args_group)] = [], # type: ignore
-    all_tools: Annotated[bool, cyclopts.Parameter(group=tool_args_group)] = False,
+    provider: ModelProvider="ollama",
+    endpoint: Annotated[Optional[str], cyclopts.Parameter(help="e.g., http://localhost:11434 by default for ollama")] = None,
+    model: Annotated[Optional[str], cyclopts.Parameter(help="default is Qwen-8B, e.g., qwen3:8b got ollama")] = None,
+    model_path: Annotated[Optional[str], cyclopts.Parameter(help = "path to local gguf file, if using llama.cpp")] = None,
     turn_termination_condition: Annotated[
         TerminationCondition, cyclopts.Parameter(
             name=['--ttc'],
@@ -342,27 +380,41 @@ async def chatloop(
     max_inference_calls_per_turn: int = 10,
     minimize_thinking: bool = False,
     debug: bool = False,
+    mcps: Annotated[list[ExistingMCPReferenceNames], cyclopts.Parameter(group=mcp_args_group)] = [], # type: ignore
+    all_mcps: Annotated[bool, cyclopts.Parameter(group=mcp_args_group)] = False,
+    tools: Annotated[
+        list[ExistingToolDefinitionNames], cyclopts.Parameter(group=tool_args_group)] = [], # type: ignore
+    all_tools: Annotated[bool, cyclopts.Parameter(group=tool_args_group)] = False,
 ):
     init_logger(logging.DEBUG if debug else logging.WARNING)
+    """Create a chatloop, taking into account those arguments that were set by the user on the CLI
 
+    Note: some arguments default to a strange value with a space at the end, and if that value is retained,
+    we know that the user did not specify it.  This allows for intuitive CLI hints
+    """
+    # derive ServedLLM spec
+    llm = ServedLLM(
+        model_provider=provider,
+        model_endpoint=endpoint,
+        model_name=model,
+        model_path=model_path,
+    )
+    info("\n\nInitializing agent...")
     kwargs = {
-        "model_provider": provider,
-        "model_path": model_path,
+        "llm": llm,
         "turn_termination_condition": turn_termination_condition,
         "max_inference_calls_per_turn": max_inference_calls_per_turn,
         "minimize_thinking": minimize_thinking,
     }
-
-    if arg_was_set_by_user(endpoint):
-        kwargs["model_endpoint"] = endpoint
-    if arg_was_set_by_user(model):
-        kwargs["model_name"] = model
-
-    info("\n\nInitializing agent...")
     agent = Agent(**kwargs)
+    if(all_mcps):
+        mcps = list(get_args(ExistingMCPReferenceNames))
     if(all_tools):
-        tools = get_args(ExistingToolDefinitionNames) # type: ignore
-    await agent.init_workshop(tool_collections = tools)
+        tools = list(get_args(ExistingToolDefinitionNames))
+    tool_kwargs = {
+        "llm": llm,
+    }
+    await agent.init_workshop(mcp_servers = mcps, tool_collections = tools, tool_kwargs = tool_kwargs)
     info("...initialization complete.\n")
     await agent.chat()
 

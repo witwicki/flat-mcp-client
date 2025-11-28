@@ -116,10 +116,13 @@ class TerminalIO:
         return new_index
 
 
-    def stream_output(self, response: Iterator[ollama.ChatResponse]) -> tuple[ollama.ChatResponse|None, int, int]:
+    def stream_output(self, response: Iterator[ollama.ChatResponse], name:str = "") -> tuple[ollama.ChatResponse|None, int, int]:
         """Dispay the chat response on the terminal as it is received
         and return the complete message.
         """
+        if name:
+            self.console.style = OutputDisplayMode.SYSTEM.style
+            self.console.print(f"{name}: ",end='')
         # record start inference time
         start_time = time.time()
         nanoseconds_consumed = 0
@@ -156,8 +159,6 @@ class TerminalIO:
                 raise Exception(f"Encountered chunk type {type(chunk)} that we are not set up to handle.")
             # handle chunks (print and accumulate), expecting thinking to come first if at all
             if new_chunk.message.thinking:
-                if finished_thinking:
-                    warning("TerminalIO.stream_output(): Thinking chunk encountered after chunks of another type!")
                 self.console.style = OutputDisplayMode.AGENT_THINKING.style
                 if not started_thinking:
                     # open thought section

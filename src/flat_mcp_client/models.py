@@ -1,11 +1,14 @@
 import sys
 from abc import ABC, abstractmethod
 from pprint import pformat
-from typing import Literal
+from typing import Literal, Any, Union, get_args
 from collections.abc import Iterator
 import copy
 import itertools
 import time
+import json
+import os
+from pathlib import Path
 import ollama
 from openai.types.chat import ChatCompletion
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
@@ -13,8 +16,12 @@ from openai import OpenAI
 import platformdirs
 import huggingface_hub
 import atexit
-from flat_mcp_client.stats import ModelStats
-from flat_mcp_client import debug, debug_pp, info
+from . import debug, debug_pp, info
+from .agent_helpers import ServedLLM, get_deep_value, set_deep_value
+from .stats import ModelStats
+from .prompts import just_json_schema
+
+
 
 
 # helper function
@@ -40,7 +47,8 @@ def remerge_chunked_tool_calls(tool_calls: list) -> None:
 # helper function
 def find_gguf_filename(repo_id: str, quantization: str) -> str|None:
     """
-    Finds the GGUF filename for a given quantization level in a Hugging Face repository.
+    Finds the GGUF filename for a given quantization level in a Hugging Face repository, with local caching
+    to avoid redundant HF lookups.
 
     Args:
         repo_id (str): The repository ID, e.g., "TheBloke/Mixtral-8x7B-Instruct-v0.1-GGUF".
@@ -49,17 +57,42 @@ def find_gguf_filename(repo_id: str, quantization: str) -> str|None:
     Returns:
         str: The full GGUF filename, or None if not found.
     """
-    fs = huggingface_hub.HfFileSystem()
-    files = fs.ls(repo_id, detail=False)
+    gguf_filename = lookup_cached_gguf_filename(repo_id, quantization)
+    if gguf_filename:
+        debug(f"Retrieved filename from cache: {gguf_filename}.")
+    else:
+        fs = huggingface_hub.HfFileSystem()
+        files = fs.ls(repo_id, detail=False)
+        for filename in files:
+            # Check if the filename contains pattern indicating the quantization
+            if isinstance(filename, str):
+                if quantization.lower() in filename.lower():
+                    if filename.lower().endswith(".gguf"):
+                        gguf_filename = filename.split('/')[-1] # removing any path information
+                        debug(f"Found filename on hugging face: {gguf_filename}.")
+                        cache_gguf_filename(repo_id, quantization, gguf_filename)
+    return gguf_filename
 
-    for filename in files:
-        # Check if the filename contains pattern indicating the quantization
-        if isinstance(filename, str):
-            if quantization.lower() in filename.lower():
-                if filename.lower().endswith(".gguf"):
-                    return filename.split('/')[-1] # removing any path information
-    return None
+# helper function
+def lookup_cached_gguf_filename(repo_id: str, quantization: str) -> str|None:
+    cache_file = f"{Path(__file__).resolve().parent.parent.parent}/.gguf_reference_cache"
+    if os.path.exists(cache_file):
+        with open(cache_file, 'r') as file:
+            cache = json.load(file)
+            debug(f"gguf_reference_cache=\n{cache}")
+            result = get_deep_value(cache, repo_id, quantization)
+            return result
 
+# helper function
+def cache_gguf_filename(repo_id: str, quantization: str, result: str) -> None:
+    cache = {}
+    cache_file = f"{Path(__file__).resolve().parent.parent.parent}/.gguf_reference_cache"
+    if os.path.exists(cache_file):
+        with open(cache_file, 'r') as file:
+            cache = json.load(file)
+    set_deep_value(cache, result, repo_id, quantization)
+    with open(cache_file, 'w') as json_file:
+        json.dump(cache, json_file, indent=2)
 
 # helper function
 def default_thinking_value(model_name: str, minimize_thinking: bool) -> bool | Literal['low', 'medium', 'high']:
@@ -68,7 +101,6 @@ def default_thinking_value(model_name: str, minimize_thinking: bool) -> bool | L
         return 'low' if minimize_thinking else 'medium'
     else:
         return False if minimize_thinking else True
-
 
 
 
@@ -83,6 +115,7 @@ class Model(ABC):
         minimize_thinking: bool = False,
     ) -> None:
         self.model_name = model_name
+        self.endpoint = endpoint
         self.params = params
         self.minimize_thinking = minimize_thinking
         info(f"Spinning up {model_name} on {endpoint}...")
@@ -96,6 +129,44 @@ class Model(ABC):
             ))
         self.stats = ModelStats(model_metadata={"model_name": model_name, "params": params, "endpoint": endpoint, "minimize_thinking": minimize_thinking})
         atexit.register(self.at_exit)
+
+
+    @staticmethod
+    def create(
+        llm_server_spec: ServedLLM,
+        model_params: dict = {},
+        minimize_thinking:bool = False,
+    ) -> "Model":
+        """
+        Model factory, creating a concrete subclass of Model according to spec,
+        side-effecing the spec to fill in any args that were missing
+        """
+        # LLM particulars
+        kwargs : dict[str,Any] = { "params": model_params, "minimize_thinking": minimize_thinking }
+        model = None
+        # Pass {model_name, endpoint} parameters only if user has specified the non-default (non-empty) values
+        #  since Model (and offspring) classes themselves specify their own default values umbenounced to Agent()
+        if llm_server_spec.model_name:
+            kwargs["model_name"] = llm_server_spec.model_name
+        if llm_server_spec.model_endpoint:
+            kwargs["endpoint"] = llm_server_spec.model_endpoint
+        if llm_server_spec.model_path and (llm_server_spec.model_provider != "llama.cpp"):
+            sys.exit("\nError: model-path can only be specified when selecting llama.cpp as the provider.\n\n")
+        # use the appropriate constructor depending on provider
+        if llm_server_spec.model_provider == "vllm":
+            model = VLLMModel(**kwargs)
+        elif llm_server_spec.model_provider == "llama.cpp":
+            print()
+            kwargs["model_path"] = llm_server_spec.model_path
+            model = LlamaCppModel(**kwargs)
+            llm_server_spec.model_path = model.model_path
+        else:
+            model = OllamaModel(**kwargs)
+        # fill in missing fields of spec
+        llm_server_spec.model_name = model.model_name
+        llm_server_spec.model_endpoint = model.endpoint
+        return model
+
 
     @abstractmethod
     def is_model_served(self) -> bool:
@@ -121,16 +192,17 @@ class Model(ABC):
         pass
 
 
-    def record_stats(self, response: ollama.ChatResponse, time_to_first_token: int, time_to_first_nonthinking_token: int):
-        self.stats.append(
-            time_to_first_token = time_to_first_token/1_000_000_000,
-            time_to_first_nonthinking_token = time_to_first_nonthinking_token/1_000_000_000,
-            prompt_parsing_time = response["prompt_eval_duration"]/1_000_000_000,
-            generation_time = response["eval_duration"]/1_000_000_000,
-            response_time = response["total_duration"]/1_000_000_000,
-            num_input_tokens = response["prompt_eval_count"],
-            num_output_tokens = response["eval_count"],
-        )
+    def record_stats(self, response: ollama.ChatResponse | None, time_to_first_token: int, time_to_first_nonthinking_token: int):
+        if response:
+            self.stats.append(
+                time_to_first_token = time_to_first_token/1_000_000_000,
+                time_to_first_nonthinking_token = time_to_first_nonthinking_token/1_000_000_000,
+                prompt_parsing_time = response["prompt_eval_duration"]/1_000_000_000,
+                generation_time = response["eval_duration"]/1_000_000_000,
+                response_time = response["total_duration"]/1_000_000_000,
+                num_input_tokens = response["prompt_eval_count"],
+                num_output_tokens = response["eval_count"],
+            )
 
 
     def at_exit(self):
@@ -160,11 +232,17 @@ class Model(ABC):
     ) -> list:
         for key, response in tool_results.items():
             tool_name, tool_call_id, _ = key # note: keys take the form of (tool_name, id, frozenset(arguments))
+            content = response.get('content')
+            if isinstance(content, dict):
+                content = json.dumps(content)
+            elif not isinstance(content, str):
+                raise AttributeError(f"Model.extend_messages_with_tool_responses() processing tool call result of unsupported type {type(content)}")
+            content_or_error: str = content or f"Error: {response.get('error')}" or "Unspecfied error occurred"
             messages.append({
                 'role': 'tool',
                 'tool_call_id': tool_call_id,
                 'name': tool_name,
-                'content': str(response['content']),
+                'content': content_or_error,
             })
             # TODO: tweaks for other model families, e.g., function insead of tool?
         return messages
@@ -218,14 +296,20 @@ class OllamaModel(Model):
         if thinking != None:
             thinking_value = thinking
 
+        # the ollama API expects structured output as a plain json schema
+        output_format = None
+        if structured_output:
+            output_format = just_json_schema(structured_output)
+            debug(f"output format = {output_format}")
         return self.client.chat(
             model=self.model_name,
             messages=messages,
-            format=structured_output,
+            format=output_format,
             keep_alive=self.keep_alive,
             tools=tools,
             think=thinking_value,
             stream=stream,
+            options = {"num_ctx": max_context_length}
         )
 
 
@@ -325,6 +409,9 @@ class ModelServedWithOpenAICompatibleAPI(Model):
             "frequency_penalty": 1.0, # avoid repetition
             "extra_body": {"chat_template_kwargs": chat_template_kwargs},
         }
+        if structured_output:
+            kwargs["response_format"] = structured_output
+            debug(f"output format = {structured_output}")
         if prescribed_tool:
             kwargs["tool_choice"] = prescribed_tool
         debug_pp(kwargs)
@@ -409,7 +496,7 @@ class LlamaCppModel(ModelServedWithOpenAICompatibleAPI):
 
     def __init__(
         self,
-        model_name: str = "unsloth/Qwen3-8B-GGUF:Q4_K_XL", # "gpt-oss:latest", # Selected LLM model
+        model_name: str = "unsloth/Qwen3-8B-GGUF:Q4_K_M", # "gpt-oss:latest", # Selected LLM model
         params: dict = {}, # setting of non-default parameters to pass to llm provider
         endpoint: str = "http://localhost:8080/v1", # ollama server endpoint
         model_path: str | None = None,
@@ -426,9 +513,9 @@ class LlamaCppModel(ModelServedWithOpenAICompatibleAPI):
             author, name = repo_name.split("/")
             basename = name.strip("-GGUF")
             gguf_filename_hf = find_gguf_filename(repo_name, quant)
-            debug(f"Found filename on hugging face: {gguf_filename_hf}.")
             gguf_filename = gguf_filename_hf or f"{basename}{quant}.gguf"
             gguf_path = f"{platformdirs.user_cache_dir()}/llama.cpp/{author}_{basename}-GGUF_{gguf_filename}"
+        self.model_path = gguf_path
 
         # TODO: handle remaining params
         super().__init__(gguf_path, params, endpoint, minimize_thinking)
