@@ -80,17 +80,38 @@ class Context:
             return messages
 
 
-    def derive_full_history(self) -> list:
-        """System prompt + chat history
-        """
+    def derive_full_history(self, system_prompt_substitutions: dict = {}) -> list:
+        """System prompt + chat history"""
         # system prompt...
         messages = [
             {
                 "role": "system",
-                "content": self.system_prompt,
+                "content": self.system_prompt.format(**system_prompt_substitutions),
             }
         ]
         messages.extend(self.chat_history)
+        return messages
+
+
+    def system_plus_user_prompt(self, system_prompt_substitutions: dict = {}) -> list:
+        """System prompt + latest user prompt"""
+        system_prompt = self.system_prompt
+        if system_prompt_substitutions:
+            system_prompt = self.system_prompt.format(**system_prompt_substitutions)
+
+        messages = [
+            {
+                "role": "system",
+                "content": system_prompt,
+            },
+        ]
+        if self.latest_user_prompt:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": self.latest_user_prompt,
+                }
+            )
         return messages
 
 
@@ -171,7 +192,11 @@ class Agent:
         self.context.chat_history = updated_history
 
 
-    async def agentic_response(self, user_prompt: str | None) -> tuple[str, list, int, list]:
+    async def agentic_response(
+        self,
+        user_prompt: str | None,
+        system_prompt_substitutions: dict[str,str] = {},
+    ) -> tuple[str, list, int, list]:
         """Intended to be called for a single turn of conversation, this function allows agent to
         perform a series of inference calls before expressing a final response.
         """
@@ -195,7 +220,9 @@ class Agent:
             steps += 1
 
             # invoke chat API
-            response_content, thinking_content, tool_calls = self.generate_and_stream_response()
+            response_content, thinking_content, tool_calls = self.generate_and_stream_response(
+                system_prompt_substitutions=system_prompt_substitutions,
+            )
             agent_response = {
                 'role': 'assistant',
                 'content': response_content,
@@ -241,13 +268,22 @@ class Agent:
 
     def generate_and_stream_response(
         self,
+        use_history: bool = True,
+        system_prompt_substitutions: dict[str,str] = {}
     ) -> tuple[str,str,list]:
         """Compile augmented context and generate a response to the user's latest query"""
+        context_messages = []
+        complete_response = None
+        if use_history:
+            context_messages = self.context.derive_full_history(system_prompt_substitutions)
+        else:
+            context_messages = self.context.system_plus_user_prompt(system_prompt_substitutions)
         try:
             response = self.model.generate_chat_response(
-                self.context.derive_full_history(),
+                context_messages,
                 structured_output = self.context.structured_output,
-                tools = self.list_of_all_tools
+                tools = self.list_of_all_tools,
+                stream = True
             )
         except Exception as e:
             error(f"\n\nERROR: call to generate_chat_response() failed with with the error: \n{e}")
