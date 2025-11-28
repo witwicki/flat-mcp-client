@@ -1,7 +1,7 @@
 import sys
 from abc import ABC, abstractmethod
 from pprint import pformat
-from typing import Literal
+from typing import Literal, Any, Union, get_args
 from collections.abc import Iterator
 import copy
 import itertools
@@ -13,8 +13,12 @@ from openai import OpenAI
 import platformdirs
 import huggingface_hub
 import atexit
-from flat_mcp_client.stats import ModelStats
-from flat_mcp_client import debug, debug_pp, info
+from . import debug, debug_pp, info
+from .agent_helpers import ServedLLM, get_deep_value, set_deep_value
+from .stats import ModelStats
+from .prompts import just_json_schema
+
+
 
 
 # helper function
@@ -71,7 +75,6 @@ def default_thinking_value(model_name: str, minimize_thinking: bool) -> bool | L
 
 
 
-
 class Model(ABC):
     """LLM Model abstract base class"""
 
@@ -83,6 +86,7 @@ class Model(ABC):
         minimize_thinking: bool = False,
     ) -> None:
         self.model_name = model_name
+        self.endpoint = endpoint
         self.params = params
         self.minimize_thinking = minimize_thinking
         info(f"Spinning up {model_name} on {endpoint}...")
@@ -96,6 +100,44 @@ class Model(ABC):
             ))
         self.stats = ModelStats(model_metadata={"model_name": model_name, "params": params, "endpoint": endpoint, "minimize_thinking": minimize_thinking})
         atexit.register(self.at_exit)
+
+
+    @staticmethod
+    def create(
+        llm_server_spec: ServedLLM,
+        model_params: dict = {},
+        minimize_thinking:bool = False,
+    ) -> "Model":
+        """
+        Model factory, creating a concrete subclass of Model according to spec,
+        side-effecing the spec to fill in any args that were missing
+        """
+        # LLM particulars
+        kwargs : dict[str,Any] = { "params": model_params, "minimize_thinking": minimize_thinking }
+        model = None
+        # Pass {model_name, endpoint} parameters only if user has specified the non-default (non-empty) values
+        #  since Model (and offspring) classes themselves specify their own default values umbenounced to Agent()
+        if llm_server_spec.model_name:
+            kwargs["model_name"] = llm_server_spec.model_name
+        if llm_server_spec.model_endpoint:
+            kwargs["endpoint"] = llm_server_spec.model_endpoint
+        if llm_server_spec.model_path and (llm_server_spec.model_provider != "llama.cpp"):
+            sys.exit("\nError: model-path can only be specified when selecting llama.cpp as the provider.\n\n")
+        # use the appropriate constructor depending on provider
+        if llm_server_spec.model_provider == "vllm":
+            model = VLLMModel(**kwargs)
+        elif llm_server_spec.model_provider == "llama.cpp":
+            print()
+            kwargs["model_path"] = llm_server_spec.model_path
+            model = LlamaCppModel(**kwargs)
+            llm_server_spec.model_path = model.model_path
+        else:
+            model = OllamaModel(**kwargs)
+        # fill in missing fields of spec
+        llm_server_spec.model_name = model.model_name
+        llm_server_spec.model_endpoint = model.endpoint
+        return model
+
 
     @abstractmethod
     def is_model_served(self) -> bool:
@@ -121,16 +163,17 @@ class Model(ABC):
         pass
 
 
-    def record_stats(self, response: ollama.ChatResponse, time_to_first_token: int, time_to_first_nonthinking_token: int):
-        self.stats.append(
-            time_to_first_token = time_to_first_token/1_000_000_000,
-            time_to_first_nonthinking_token = time_to_first_nonthinking_token/1_000_000_000,
-            prompt_parsing_time = response["prompt_eval_duration"]/1_000_000_000,
-            generation_time = response["eval_duration"]/1_000_000_000,
-            response_time = response["total_duration"]/1_000_000_000,
-            num_input_tokens = response["prompt_eval_count"],
-            num_output_tokens = response["eval_count"],
-        )
+    def record_stats(self, response: ollama.ChatResponse | None, time_to_first_token: int, time_to_first_nonthinking_token: int):
+        if response:
+            self.stats.append(
+                time_to_first_token = time_to_first_token/1_000_000_000,
+                time_to_first_nonthinking_token = time_to_first_nonthinking_token/1_000_000_000,
+                prompt_parsing_time = response["prompt_eval_duration"]/1_000_000_000,
+                generation_time = response["eval_duration"]/1_000_000_000,
+                response_time = response["total_duration"]/1_000_000_000,
+                num_input_tokens = response["prompt_eval_count"],
+                num_output_tokens = response["eval_count"],
+            )
 
 
     def at_exit(self):
@@ -409,7 +452,7 @@ class LlamaCppModel(ModelServedWithOpenAICompatibleAPI):
 
     def __init__(
         self,
-        model_name: str = "unsloth/Qwen3-8B-GGUF:Q4_K_XL", # "gpt-oss:latest", # Selected LLM model
+        model_name: str = "unsloth/Qwen3-8B-GGUF:Q4_K_M", # "gpt-oss:latest", # Selected LLM model
         params: dict = {}, # setting of non-default parameters to pass to llm provider
         endpoint: str = "http://localhost:8080/v1", # ollama server endpoint
         model_path: str | None = None,
@@ -426,9 +469,9 @@ class LlamaCppModel(ModelServedWithOpenAICompatibleAPI):
             author, name = repo_name.split("/")
             basename = name.strip("-GGUF")
             gguf_filename_hf = find_gguf_filename(repo_name, quant)
-            debug(f"Found filename on hugging face: {gguf_filename_hf}.")
             gguf_filename = gguf_filename_hf or f"{basename}{quant}.gguf"
             gguf_path = f"{platformdirs.user_cache_dir()}/llama.cpp/{author}_{basename}-GGUF_{gguf_filename}"
+        self.model_path = gguf_path
 
         # TODO: handle remaining params
         super().__init__(gguf_path, params, endpoint, minimize_thinking)

@@ -1,35 +1,22 @@
 import sys
 import json
-import random
-import string
-from typing import Any, Literal, Annotated, cast, get_args
+from typing import Any, Optional, Annotated, cast, get_args
 from collections.abc import Iterator
 import importlib
 import logging
 import cyclopts
+import traceback
 
 import ollama
 
-from flat_mcp_client.models import OllamaModel, VLLMModel, LlamaCppModel
-from flat_mcp_client.tools import Workshop
-from flat_mcp_client.tool_defs import ExistingToolDefinitionNames
-from flat_mcp_client.io.ui import HumanInterface
-from flat_mcp_client import init_logger, info, debug, debug_pp, error
+from .models import Model
+from .tools import Workshop
+from .tool_defs import ExistingToolDefinitionNames
+from .mcp_refs import ExistingMCPReferenceNames
+from .io.ui import HumanInterface
+from .agent_helpers import ModelProvider, TerminationCondition, ServedLLM, generate_random_id
+from . import init_logger, info, debug, debug_pp, error
 
-# USEFUL STRING LITERALS
-ModelProvider = Literal["ollama", "vllm", "llama.cpp"]
-TerminationCondition = Literal[
-    "inference_call_completed",
-    "nonempty_response_content",
-    "no_further_tool_calls",
-    "self_determined_termination"
-]
-
-# HELPER FUNCTION
-def generate_random_id():
-    characters = string.ascii_letters + string.digits
-    result = ''.join(random.choice(characters) for _ in range(9))
-    return result
 
 class Context:
     """The acting prompt, structured-output defintions, and latest state information (e.g., chat history),
@@ -108,36 +95,19 @@ class Agent:
 
     def __init__(
         self,
-        model_provider: ModelProvider = "ollama",
-        model_endpoint: str = "",
-        model_name: str = "",
-        model_path: str = "", # option to specify path to local file, causing model_name to be disregarded
+        name: str = "agent_zero",
+        llm: ServedLLM = ServedLLM(),
         model_params: dict = {},
-        prompt_name: str = "default",
         minimize_thinking = False, # note: paramaters related to thinking/reasoning can be overridden in the chat flow
+        prompt_name: str = "default",
         turn_termination_condition: TerminationCondition = "inference_call_completed",
         max_inference_calls_per_turn : int|None = None,
     ) -> None:
-        # LLM particulars
-        kwargs : dict[str,Any] = { "params": model_params, "minimize_thinking": minimize_thinking }
-        # Pass {model_name, endpoint} parameters only if user has specified the non-default (non-empty) values
-        #  since Model (and offspring) classes themselves specify their own default values umbenounced to Agent()
-        if model_name:
-            kwargs["model_name"] = model_name
-        if model_endpoint:
-            kwargs["endpoint"] = model_endpoint
-        if model_path and (model_provider != "llama.cpp"):
-            sys.exit("\nError: model-path can only be specified when selecting llama.cpp as the provider.\n\n")
-        # TODO: move the if-else tree below to a static instantiate_model() function in models.p
-        if model_provider == "ollama":
-            self.model = OllamaModel(**kwargs)
-        elif model_provider == "vllm":
-            self.model = VLLMModel(**kwargs)
-        elif model_provider == "llama.cpp":
-            kwargs["model_path"] = model_path
-            self.model = LlamaCppModel(**kwargs)
-        else:
-            raise Exception(f"Model provider {model_provider} is not a member of {list(ModelProvider)}!")
+        """Initializer that side-effects the ServedLLM object (llm), specifically filling in the unset default elements"""
+        self.name = name
+        # instantiate model
+        self.model = Model.create(llm, model_params, minimize_thinking)
+        self.served_llm = llm
         # context
         self.context = Context(prompt_name)
         # turn termination condition
@@ -321,19 +291,12 @@ tool_args_group = cyclopts.Group(
     validator=cyclopts.validators.LimitedChoice(),  # Mutually Exclusive Options
 )
 
-def arg_was_set_by_user(argval: str):
-    """Convention: space and end of freeform parameter indicates *not* set by user"""
-    return argval[-1] != ' '
-
 @app.command
 async def chatloop(
-    provider: ModelProvider = "ollama",
-    endpoint: str = "http://localhost:11434 ", # space at end intentional
-    model: str = "qwen3:8b ", #"hf.co/Qwen/Qwen3-8B-GGUF:Q4_K_M ", #"gpt-oss:latest ",
-    model_path: Annotated[str, cyclopts.Parameter(help = "Path to local gguf file, if using llama.cpp")] = "",
-    tools: Annotated[
-        list[ExistingToolDefinitionNames], cyclopts.Parameter(group=tool_args_group)] = [], # type: ignore
-    all_tools: Annotated[bool, cyclopts.Parameter(group=tool_args_group)] = False,
+    provider: ModelProvider="ollama",
+    endpoint: Annotated[Optional[str], cyclopts.Parameter(help="e.g., http://localhost:11434 by default for ollama")] = None,
+    model: Annotated[Optional[str], cyclopts.Parameter(help="default is Qwen-8B, e.g., qwen3:8b got ollama")] = None,
+    model_path: Annotated[Optional[str], cyclopts.Parameter(help = "path to local gguf file, if using llama.cpp")] = None,
     turn_termination_condition: Annotated[
         TerminationCondition, cyclopts.Parameter(
             name=['--ttc'],
@@ -344,21 +307,25 @@ async def chatloop(
     debug: bool = False,
 ):
     init_logger(logging.DEBUG if debug else logging.WARNING)
+    """Create a chatloop, taking into account those arguments that were set by the user on the CLI
 
+    Note: some arguments default to a strange value with a space at the end, and if that value is retained,
+    we know that the user did not specify it.  This allows for intuitive CLI hints
+    """
+    # derive ServedLLM spec
+    llm = ServedLLM(
+        model_provider=provider,
+        model_endpoint=endpoint,
+        model_name=model,
+        model_path=model_path,
+    )
+    info("\n\nInitializing agent...")
     kwargs = {
-        "model_provider": provider,
-        "model_path": model_path,
+        "llm": llm,
         "turn_termination_condition": turn_termination_condition,
         "max_inference_calls_per_turn": max_inference_calls_per_turn,
         "minimize_thinking": minimize_thinking,
     }
-
-    if arg_was_set_by_user(endpoint):
-        kwargs["model_endpoint"] = endpoint
-    if arg_was_set_by_user(model):
-        kwargs["model_name"] = model
-
-    info("\n\nInitializing agent...")
     agent = Agent(**kwargs)
     if(all_tools):
         tools = get_args(ExistingToolDefinitionNames) # type: ignore
