@@ -1,21 +1,26 @@
-import sys
-import json
-from typing import Any, Optional, Annotated, cast, get_args
-from collections.abc import Iterator
 import importlib
+import json
 import logging
-import cyclopts
+import sys
 import traceback
+from collections.abc import Iterator
+from typing import Annotated, Any, Optional, cast, get_args
 
+import cyclopts
 import ollama
 
-from .models import Model
-from .tools import Workshop
-from .tool_defs import ExistingToolDefinitionNames
-from .mcp_refs import ExistingMCPReferenceNames
+from . import debug, debug_pp, error, info, init_logger
+from .agent_helpers import (
+    ModelProvider,
+    ServedLLM,
+    TerminationCondition,
+    generate_random_id,
+)
 from .io.ui import HumanInterface
-from .agent_helpers import ModelProvider, TerminationCondition, ServedLLM, generate_random_id
-from . import init_logger, info, debug, debug_pp, error
+from .mcp_refs import ExistingMCPReferenceNames
+from .models import Model
+from .tool_defs import ExistingToolDefinitionNames
+from .tools import Workshop
 
 
 class Context:
@@ -25,13 +30,15 @@ class Context:
 
     def __init__(
         self,
-        prompt_name: str = "default", # reference to prompt (and optional strucuted output definition)
+        prompt_name: str = "default",  # reference to prompt (and optional strucuted output definition)
     ) -> None:
-        """ Constructor
+        """Constructor
 
         Args:
-            prompt_name (str): a reference to the prompt (and optional structured-output definition),
-               where {prompt_name}.py should exist in the ./prompts/ directory
+            prompt_name (str): a reference to the prompt (and optional structured-output definition).
+               Can be either:
+               - A short name (e.g., "default") which resolves to flat_mcp_client.prompts.{prompt_name}
+               - A fully qualified module path (e.g., "my_project.prompts.custom") for external prompts
         """
         # lookup prompts and structured output specs
         self.prompt_name = prompt_name
@@ -40,45 +47,63 @@ class Context:
         self.latest_user_prompt = ""
         self.chat_history = []
 
-
     def load_system_prompt_and_structured_output(self):
         try:
-            prompt_module = importlib.import_module(f"flat_mcp_client.prompts.{self.prompt_name}")
+            # Check if prompt_name is a fully qualified module path or a short name
+            if "." in self.prompt_name:
+                # Fully qualified module path (e.g., "my_project.prompts.custom")
+                module_name = self.prompt_name
+            else:
+                # Short name (e.g., "default") - resolve to flat_mcp_client.prompts.{name}
+                module_name = f"flat_mcp_client.prompts.{self.prompt_name}"
+
+            prompt_module = importlib.import_module(module_name)
             self.system_prompt = getattr(prompt_module, "system_prompt")
             self.structured_output = getattr(prompt_module, "structured_output", None)
         except:
             traceback.print_exc()
-            sys.exit(f"\nFailed to load `system_prompt` from prompts/{self.prompt_name}.py.  Did you specify your custom prompt correctly?\n")
+            sys.exit(
+                f"\nFailed to load `system_prompt` from module '{self.prompt_name}'.\n"
+                f"If using a short name, ensure the module exists at flat_mcp_client.prompts.{self.prompt_name}\n"
+                f"If using a fully qualified path, ensure the module is importable and contains 'system_prompt'.\n"
+            )
 
-
-    def reload_system_prompt_and_structured_output(self, new_prompt_name: str = "") -> None:
+    def reload_system_prompt_and_structured_output(
+        self, new_prompt_name: str = ""
+    ) -> None:
         """Reload, optionally from a different file"""
         if new_prompt_name:
             self.prompt_name = new_prompt_name
-        module_name = f"flat_mcp_client.prompts.{self.prompt_name}"
+
+        # Check if prompt_name is a fully qualified module path or a short name
+        if "." in self.prompt_name:
+            # Fully qualified module path (e.g., "my_project.prompts.custom")
+            module_name = self.prompt_name
+        else:
+            # Short name (e.g., "default") - resolve to flat_mcp_client.prompts.{name}
+            module_name = f"flat_mcp_client.prompts.{self.prompt_name}"
+
         prompt_module = importlib.import_module(module_name)
         importlib.reload(prompt_module)
         self.system_prompt = getattr(prompt_module, "system_prompt")
         self.structured_output = getattr(prompt_module, "structured_output", None)
-
 
     def derive_extended_chat_history(
         self,
         user_prompt: str | None,
         agent_response: dict = {},
     ) -> list:
-            """Accounting for latest turn of user and/or agent, generate an extended version of the chat history"""
-            messages = []
-            # add conversation history...
-            messages.extend(self.chat_history)
-            # ...then latest message from user...
-            if user_prompt:
-                messages.append({"role": "user", "content": user_prompt})
-            # ...and then latest respone (which may contain tool calls)...
-            if agent_response:
-                messages.append(agent_response)
-            return messages
-
+        """Accounting for latest turn of user and/or agent, generate an extended version of the chat history"""
+        messages = []
+        # add conversation history...
+        messages.extend(self.chat_history)
+        # ...then latest message from user...
+        if user_prompt:
+            messages.append({"role": "user", "content": user_prompt})
+        # ...and then latest respone (which may contain tool calls)...
+        if agent_response:
+            messages.append(agent_response)
+        return messages
 
     def derive_full_history(self, system_prompt_substitutions: dict = {}) -> list:
         """System prompt + chat history"""
@@ -91,7 +116,6 @@ class Context:
         ]
         messages.extend(self.chat_history)
         return messages
-
 
     def system_plus_user_prompt(self, system_prompt_substitutions: dict = {}) -> list:
         """System prompt + latest user prompt"""
@@ -115,7 +139,6 @@ class Context:
         return messages
 
 
-
 class Agent:
     """An LLM Agent, equipped with a model and a workshop (tools and resources),
     acting on dynamic context, following a predetermined flow.
@@ -126,10 +149,10 @@ class Agent:
         name: str = "agent_zero",
         llm: ServedLLM = ServedLLM(),
         model_params: dict = {},
-        minimize_thinking = False, # note: paramaters related to thinking/reasoning can be overridden in the chat flow
+        minimize_thinking=False,  # note: paramaters related to thinking/reasoning can be overridden in the chat flow
         prompt_name: str = "default",
         turn_termination_condition: TerminationCondition = "inference_call_completed",
-        max_inference_calls_per_turn : int|None = None,
+        max_inference_calls_per_turn: int | None = None,
     ) -> None:
         """Initializer that side-effects the ServedLLM object (llm), specifically filling in the unset default elements"""
         self.name = name
@@ -146,13 +169,12 @@ class Agent:
         # interface
         self.io = HumanInterface()
 
-
     async def init_workshop(
         self,
         mcp_servers: list[str] = [],
         tool_collections: list[str] = [],
         resources: list[str] = [],
-        tool_kwargs = {},
+        tool_kwargs={},
     ) -> None:
         """Initialize workshop, made up of toolboxes and resources
 
@@ -171,10 +193,9 @@ class Agent:
         self.list_of_all_tools = self.workshop.list_of_all_tools()
         # todo: inventory resourcess
 
-
-    async def call_tools(self, tool_calls:list) -> dict:
-        """ call tools, make small modification as necessary, and return a dictionary whose keys are
-        (function name, parameters as frozensets) and whose values are the return values of the respective calls """
+    async def call_tools(self, tool_calls: list) -> dict:
+        """call tools, make small modification as necessary, and return a dictionary whose keys are
+        (function name, parameters as frozensets) and whose values are the return values of the respective calls"""
         returns = {}
         if not isinstance(tool_calls, list):
             tool_calls = [tool_calls]
@@ -182,7 +203,7 @@ class Agent:
             try:
                 function = tool_call.function.name
                 arguments = tool_call.function.arguments
-                tool_call_id = getattr(tool_call, 'id', generate_random_id())
+                tool_call_id = getattr(tool_call, "id", generate_random_id())
                 # accept arguments either as json string or dict
                 if isinstance(arguments, str):
                     arguments = json.loads(arguments)
@@ -194,25 +215,24 @@ class Agent:
                 debug(f"Further details: {tool_call} resulted in {e}")
         return returns
 
-
     def update_chat_history(
-        self, user_prompt: str | None = None,
+        self,
+        user_prompt: str | None = None,
         agent_response: dict = {},
-        tool_results: dict = {}
+        tool_results: dict = {},
     ) -> None:
         self.context.latest_user_prompt = user_prompt or ""
         updated_history = self.model.extend_messages_with_tool_responses(
             self.context.derive_extended_chat_history(user_prompt, agent_response),
-            tool_results
+            tool_results,
         )
         self.context.chat_history = updated_history
-
 
     async def agentic_response(
         self,
         user_prompt: str | None,
         overloaded_system_prompt_for_this_response: str | None = None,
-        system_prompt_substitutions: dict[str,str] = {},
+        system_prompt_substitutions: dict[str, str] = {},
         overloaded_structured_output_for_this_response: dict | None = None,
         use_and_track_history_for_this_response: bool = True,
     ) -> tuple[str, list, int, list]:
@@ -223,10 +243,12 @@ class Agent:
         if overloaded_system_prompt_for_this_response:
             self.context.system_prompt = overloaded_system_prompt_for_this_response
         if overloaded_structured_output_for_this_response:
-            self.context.structured_output = overloaded_structured_output_for_this_response
+            self.context.structured_output = (
+                overloaded_structured_output_for_this_response
+            )
         # update chat history, or at minimum latest_user_prompt context variable, with user's latest prompt
         if use_and_track_history_for_this_response:
-            self.update_chat_history(user_prompt = user_prompt)
+            self.update_chat_history(user_prompt=user_prompt)
         else:
             self.context.latest_user_prompt = user_prompt or ""
         # remember latest agent tool calls (+results), responses, and thinking contents
@@ -239,24 +261,26 @@ class Agent:
         termination_condition_met = False
         steps = 0
 
-        while (
-            (not termination_condition_met) and
-            ((not self.max_inference_calls_per_turn) or (steps < self.max_inference_calls_per_turn))
+        while (not termination_condition_met) and (
+            (not self.max_inference_calls_per_turn)
+            or (steps < self.max_inference_calls_per_turn)
         ):
             steps += 1
 
             # invoke chat API
-            response_content, thinking_content, tool_calls = self.generate_and_stream_response(
-                system_prompt_substitutions=system_prompt_substitutions,
-                use_history=use_and_track_history_for_this_response,
+            response_content, thinking_content, tool_calls = (
+                self.generate_and_stream_response(
+                    system_prompt_substitutions=system_prompt_substitutions,
+                    use_history=use_and_track_history_for_this_response,
+                )
             )
             agent_response = {
-                'role': 'assistant',
-                'content': response_content,
-                'tool_calls': tool_calls,
+                "role": "assistant",
+                "content": response_content,
+                "tool_calls": tool_calls,
             }
             if thinking_content:
-                agent_response['reasoning_content'] = thinking_content
+                agent_response["reasoning_content"] = thinking_content
 
             # call tools selected by agent
             tool_results = {}
@@ -275,8 +299,8 @@ class Agent:
             # update chat history accordingly
             if use_and_track_history_for_this_response:
                 self.update_chat_history(
-                    agent_response = agent_response,
-                    tool_results = tool_results,
+                    agent_response=agent_response,
+                    tool_results=tool_results,
                 )
 
             # check termination condition
@@ -286,43 +310,56 @@ class Agent:
                 case "nonempty_response_content":
                     termination_condition_met = bool(response_content)
                 case "no_further_tool_calls":
-                    termination_condition_met = (not tool_calls)
+                    termination_condition_met = not tool_calls
                 case "self_determined_termination":
-                    raise NotImplementedError("No self-determined termination for this flow.")
+                    raise NotImplementedError(
+                        "No self-determined termination for this flow."
+                    )
 
         final_tool_calls = tool_calls
         return response_content, final_tool_calls, steps, tool_sequence
         # TODO: return the full history of the agent's turn
 
-
     def generate_and_stream_response(
-        self,
-        use_history: bool = True,
-        system_prompt_substitutions: dict[str,str] = {}
-    ) -> tuple[str,str,list]:
+        self, use_history: bool = True, system_prompt_substitutions: dict[str, str] = {}
+    ) -> tuple[str, str, list]:
         """Compile augmented context and generate a response to the user's latest query"""
         context_messages = []
         complete_response = None
         if use_history:
-            context_messages = self.context.derive_full_history(system_prompt_substitutions)
+            context_messages = self.context.derive_full_history(
+                system_prompt_substitutions
+            )
         else:
-            context_messages = self.context.system_plus_user_prompt(system_prompt_substitutions)
+            context_messages = self.context.system_plus_user_prompt(
+                system_prompt_substitutions
+            )
         try:
             response = self.model.generate_chat_response(
                 context_messages,
-                structured_output = self.context.structured_output,
-                tools = self.list_of_all_tools,
-                stream = True
+                structured_output=self.context.structured_output,
+                tools=self.list_of_all_tools,
+                stream=True,
             )
             if isinstance(response, Iterator):
-                complete_response, time_to_first_token, time_to_first_nonthinking_token = self.io.stream_output(response, name=self.name)
-                self.model.record_stats(complete_response, time_to_first_token, time_to_first_nonthinking_token)
+                (
+                    complete_response,
+                    time_to_first_token,
+                    time_to_first_nonthinking_token,
+                ) = self.io.stream_output(response, name=self.name)
+                self.model.record_stats(
+                    complete_response,
+                    time_to_first_token,
+                    time_to_first_nonthinking_token,
+                )
                 debug("Chat Response Message:")
                 debug_pp(complete_response)
         except Exception as e:
             traceback.print_exc()
-            error(f"\n\nERROR: call to generate_chat_response() failed with with the error: \n{e}")
-            response = iter([]) # dummy
+            error(
+                f"\n\nERROR: call to generate_chat_response() failed with with the error: \n{e}"
+            )
+            response = iter([])  # dummy
         if isinstance(complete_response, ollama.ChatResponse):
             response_content = cast(str, complete_response.message.content)
             thinking_content = cast(str, complete_response.message.thinking)
@@ -331,14 +368,13 @@ class Agent:
         else:
             return "", "", []
 
-
     async def chat(self) -> None:
-        """ simple turn-by-turn chat between user and agent """
+        """simple turn-by-turn chat between user and agent"""
 
         user_terminated_session = False
         while not user_terminated_session:
             # USER'S TURN
-            user_prompt = self.io.get_user_input() # blocking
+            user_prompt = self.io.get_user_input()  # blocking
             if user_prompt.lower() in ["bye", "goodbye", "/bye", "quit", "exit"]:
                 user_terminated_session = True  # Connection closed
                 break
@@ -348,8 +384,6 @@ class Agent:
             self.context.reload_system_prompt_and_structured_output()
             response_content, _, _, _ = await self.agentic_response(user_prompt)
         # TODO: write chat history to disk
-
-
 
 
 ### CLI ENTRY POINT ###
@@ -366,24 +400,36 @@ tool_args_group = cyclopts.Group(
     validator=cyclopts.validators.LimitedChoice(),  # Mutually Exclusive Options
 )
 
+
 @app.command
 async def chatloop(
-    provider: ModelProvider="ollama",
-    endpoint: Annotated[Optional[str], cyclopts.Parameter(help="e.g., http://localhost:11434 by default for ollama")] = None,
-    model: Annotated[Optional[str], cyclopts.Parameter(help="default is Qwen-8B, e.g., qwen3:8b got ollama")] = None,
-    model_path: Annotated[Optional[str], cyclopts.Parameter(help = "path to local gguf file, if using llama.cpp")] = None,
+    provider: ModelProvider = "ollama",
+    endpoint: Annotated[
+        Optional[str],
+        cyclopts.Parameter(help="e.g., http://localhost:11434 by default for ollama"),
+    ] = None,
+    model: Annotated[
+        Optional[str],
+        cyclopts.Parameter(help="default is Qwen-8B, e.g., qwen3:8b got ollama"),
+    ] = None,
+    model_path: Annotated[
+        Optional[str],
+        cyclopts.Parameter(help="path to local gguf file, if using llama.cpp"),
+    ] = None,
     turn_termination_condition: Annotated[
-        TerminationCondition, cyclopts.Parameter(
-            name=['--ttc'],
-            help = "Turn Termination Condition"
-        )] = "no_further_tool_calls",
+        TerminationCondition,
+        cyclopts.Parameter(name=["--ttc"], help="Turn Termination Condition"),
+    ] = "no_further_tool_calls",
     max_inference_calls_per_turn: int = 10,
     minimize_thinking: bool = False,
     debug: bool = False,
-    mcps: Annotated[list[ExistingMCPReferenceNames], cyclopts.Parameter(group=mcp_args_group)] = [], # type: ignore
+    mcps: Annotated[
+        list[ExistingMCPReferenceNames], cyclopts.Parameter(group=mcp_args_group)
+    ] = [],  # type: ignore
     all_mcps: Annotated[bool, cyclopts.Parameter(group=mcp_args_group)] = False,
     tools: Annotated[
-        list[ExistingToolDefinitionNames], cyclopts.Parameter(group=tool_args_group)] = [], # type: ignore
+        list[ExistingToolDefinitionNames], cyclopts.Parameter(group=tool_args_group)
+    ] = [],  # type: ignore
     all_tools: Annotated[bool, cyclopts.Parameter(group=tool_args_group)] = False,
 ):
     init_logger(logging.DEBUG if debug else logging.WARNING)
@@ -407,17 +453,18 @@ async def chatloop(
         "minimize_thinking": minimize_thinking,
     }
     agent = Agent(**kwargs)
-    if(all_mcps):
+    if all_mcps:
         mcps = list(get_args(ExistingMCPReferenceNames))
-    if(all_tools):
+    if all_tools:
         tools = list(get_args(ExistingToolDefinitionNames))
     tool_kwargs = {
         "llm": llm,
     }
-    await agent.init_workshop(mcp_servers = mcps, tool_collections = tools, tool_kwargs = tool_kwargs)
+    await agent.init_workshop(
+        mcp_servers=mcps, tool_collections=tools, tool_kwargs=tool_kwargs
+    )
     info("...initialization complete.\n")
     await agent.chat()
-
 
 
 if __name__ == "__main__":
