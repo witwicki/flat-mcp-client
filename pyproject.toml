@@ -1,6 +1,6 @@
 [project]
 name = "flat-mcp-client"
-version = "0.2.0"
+version = "0.3.0"
 description = "Fast Local Agents with Tools (mcp-client edition) is a lightweight package for connecting local (self-hosted) LLMs to tooling+data and for prototyping agentic flows"
 readme = "README.md"
 authors = [
