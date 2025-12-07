@@ -9,7 +9,7 @@ from typing import Annotated, Any, Optional, cast, get_args
 import cyclopts
 import ollama
 
-from . import debug, debug_pp, error, info, init_logger
+from . import debug, debug_pp, error, info, init_logger, _get_calling_package
 from .agent_helpers import (
     ModelProvider,
     ServedLLM,
@@ -35,10 +35,10 @@ class Context:
         """Constructor
 
         Args:
-            prompt_name (str): a reference to the prompt (and optional structured-output definition).
-               Can be either:
-               - A short name (e.g., "default") which resolves to flat_mcp_client.prompts.{prompt_name}
-               - A fully qualified module path (e.g., "my_project.prompts.custom") for external prompts
+            prompt_name (str): a short name reference to the prompt (and optional structured-output definition).
+               The system will search for the prompt in this order:
+               1. {calling_package}.prompts.{prompt_name} (your project's prompts)
+               2. flat_mcp_client.prompts.{prompt_name} (built-in prompts)
         """
         # lookup prompts and structured output specs
         self.prompt_name = prompt_name
@@ -48,25 +48,38 @@ class Context:
         self.chat_history = []
 
     def load_system_prompt_and_structured_output(self):
-        try:
-            # Check if prompt_name is a fully qualified module path or a short name
-            if "." in self.prompt_name:
-                # Fully qualified module path (e.g., "my_project.prompts.custom")
-                module_name = self.prompt_name
-            else:
-                # Short name (e.g., "default") - resolve to flat_mcp_client.prompts.{name}
-                module_name = f"flat_mcp_client.prompts.{self.prompt_name}"
+        # Detect the calling package
+        calling_package = _get_calling_package()
 
-            prompt_module = importlib.import_module(module_name)
-            self.system_prompt = getattr(prompt_module, "system_prompt")
-            self.structured_output = getattr(prompt_module, "structured_output", None)
-        except:
-            traceback.print_exc()
-            sys.exit(
-                f"\nFailed to load `system_prompt` from module '{self.prompt_name}'.\n"
-                f"If using a short name, ensure the module exists at flat_mcp_client.prompts.{self.prompt_name}\n"
-                f"If using a fully qualified path, ensure the module is importable and contains 'system_prompt'.\n"
-            )
+        # Build list of module paths to try
+        module_paths = []
+        if calling_package:
+            # Try user's project first
+            module_paths.append(f"{calling_package}.prompts.{self.prompt_name}")
+        # Always fall back to flat_mcp_client
+        module_paths.append(f"flat_mcp_client.prompts.{self.prompt_name}")
+
+        # Try each path in order
+        last_error = None
+        for module_name in module_paths:
+            try:
+                prompt_module = importlib.import_module(module_name)
+                self.system_prompt = getattr(prompt_module, "system_prompt")
+                self.structured_output = getattr(prompt_module, "structured_output", None)
+                return  # Success!
+            except Exception as e:
+                last_error = e
+                continue
+
+        # If we get here, all attempts failed
+        traceback.print_exc()
+        error_msg = f"\nFailed to load `system_prompt` for '{self.prompt_name}'.\n"
+        if calling_package:
+            error_msg += f"Tried: {calling_package}.prompts.{self.prompt_name}, flat_mcp_client.prompts.{self.prompt_name}\n"
+        else:
+            error_msg += f"Tried: flat_mcp_client.prompts.{self.prompt_name}\n"
+        error_msg += "Ensure the module exists and contains 'system_prompt'.\n"
+        sys.exit(error_msg)
 
     def reload_system_prompt_and_structured_output(
         self, new_prompt_name: str = ""
@@ -75,18 +88,31 @@ class Context:
         if new_prompt_name:
             self.prompt_name = new_prompt_name
 
-        # Check if prompt_name is a fully qualified module path or a short name
-        if "." in self.prompt_name:
-            # Fully qualified module path (e.g., "my_project.prompts.custom")
-            module_name = self.prompt_name
-        else:
-            # Short name (e.g., "default") - resolve to flat_mcp_client.prompts.{name}
-            module_name = f"flat_mcp_client.prompts.{self.prompt_name}"
+        # Detect the calling package
+        calling_package = _get_calling_package()
 
-        prompt_module = importlib.import_module(module_name)
-        importlib.reload(prompt_module)
-        self.system_prompt = getattr(prompt_module, "system_prompt")
-        self.structured_output = getattr(prompt_module, "structured_output", None)
+        # Build list of module paths to try
+        module_paths = []
+        if calling_package:
+            # Try user's project first
+            module_paths.append(f"{calling_package}.prompts.{self.prompt_name}")
+        # Always fall back to flat_mcp_client
+        module_paths.append(f"flat_mcp_client.prompts.{self.prompt_name}")
+
+        # Try each path in order
+        for module_name in module_paths:
+            try:
+                prompt_module = importlib.import_module(module_name)
+                importlib.reload(prompt_module)
+                self.system_prompt = getattr(prompt_module, "system_prompt")
+                self.structured_output = getattr(prompt_module, "structured_output", None)
+                return  # Success!
+            except:
+                continue
+
+        # If we get here, all attempts failed - this shouldn't happen during reload
+        # since the prompt was already loaded once
+        pass
 
     def derive_extended_chat_history(
         self,
@@ -179,8 +205,10 @@ class Agent:
         """Initialize workshop, made up of toolboxes and resources
 
         Arguments:
-            - mcp_servers(list]) names mcp confgs by package name in `mcp_refs`
-            - tool_collections(list) names the toolboxes by package name in `tool_defs`
+            - mcp_servers(list]) names mcp configs by package name in `mcp_refs`
+            - tool_collections(list) short names of toolboxes. The system will search for each in this order:
+                1. {calling_package}.tool_defs.{name} (your project's tools)
+                2. flat_mcp_client.tool_defs.{name} (built-in tools)
             - resources(list) lists the resources available
             - tool_kwargs(dict) optionally allow specifies arguments to be passed to tools
         """
@@ -207,7 +235,8 @@ class Agent:
                 # accept arguments either as json string or dict
                 if isinstance(arguments, str):
                     arguments = json.loads(arguments)
-                dict_key = (function, tool_call_id, frozenset(arguments.items()))
+                # Use JSON serialization to handle unhashable types (lists, nested dicts, etc.)
+                dict_key = (function, tool_call_id, json.dumps(arguments, sort_keys=True))
                 returns[dict_key] = await self.workshop.call(function, arguments)
             except Exception as e:
                 error(e)

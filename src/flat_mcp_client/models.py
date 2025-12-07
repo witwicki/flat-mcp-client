@@ -1,27 +1,27 @@
-import sys
-from abc import ABC, abstractmethod
-from pprint import pformat
-from typing import Literal, Any, Union, get_args
-from collections.abc import Iterator
+import atexit
 import copy
 import itertools
-import time
 import json
 import os
+import sys
+import time
+from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from pathlib import Path
+from pprint import pformat
+from typing import Any, Literal, Union, get_args
+
+import huggingface_hub
 import ollama
+import platformdirs
+from openai import OpenAI
 from openai.types.chat import ChatCompletion
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
-from openai import OpenAI
-import platformdirs
-import huggingface_hub
-import atexit
+
 from . import debug, debug_pp, info
 from .agent_helpers import ServedLLM, get_deep_value, set_deep_value
-from .stats import ModelStats
 from .prompts import just_json_schema
-
-
+from .stats import ModelStats
 
 
 # helper function
@@ -31,21 +31,23 @@ def remerge_chunked_tool_calls(tool_calls: list) -> None:
     """
     # step backwards through the list, comparing each element to the previous
     i = len(tool_calls) - 1
-    while i>0:
-        if tool_calls[i].index == tool_calls[i-1].index:
+    while i > 0:
+        if tool_calls[i].index == tool_calls[i - 1].index:
             # if previous item's argument is {}, then it should be overwritten
-            if tool_calls[i-1].function.arguments == "{}":
-                tool_calls[i-1].function.arguments = ""
+            if tool_calls[i - 1].function.arguments == "{}":
+                tool_calls[i - 1].function.arguments = ""
             # extend string from previous item's argument with item's argument
-            tool_calls[i-1].function.arguments = f"{tool_calls[i-1].function.arguments}{tool_calls[i].function.arguments}"
+            tool_calls[
+                i - 1
+            ].function.arguments = f"{tool_calls[i - 1].function.arguments}{tool_calls[i].function.arguments}"
             # remove this item
-            del(tool_calls[i])
-            #debug(f"Merged tool_call as {tool_calls[i-1]}")
+            del tool_calls[i]
+            # debug(f"Merged tool_call as {tool_calls[i-1]}")
         i -= 1
 
 
 # helper function
-def find_gguf_filename(repo_id: str, quantization: str) -> str|None:
+def find_gguf_filename(repo_id: str, quantization: str) -> str | None:
     """
     Finds the GGUF filename for a given quantization level in a Hugging Face repository, with local caching
     to avoid redundant HF lookups.
@@ -68,40 +70,50 @@ def find_gguf_filename(repo_id: str, quantization: str) -> str|None:
             if isinstance(filename, str):
                 if quantization.lower() in filename.lower():
                     if filename.lower().endswith(".gguf"):
-                        gguf_filename = filename.split('/')[-1] # removing any path information
+                        gguf_filename = filename.split("/")[
+                            -1
+                        ]  # removing any path information
                         debug(f"Found filename on hugging face: {gguf_filename}.")
                         cache_gguf_filename(repo_id, quantization, gguf_filename)
     return gguf_filename
 
+
 # helper function
-def lookup_cached_gguf_filename(repo_id: str, quantization: str) -> str|None:
-    cache_file = f"{Path(__file__).resolve().parent.parent.parent}/.gguf_reference_cache"
+def lookup_cached_gguf_filename(repo_id: str, quantization: str) -> str | None:
+    cache_file = (
+        f"{Path(__file__).resolve().parent.parent.parent}/.gguf_reference_cache"
+    )
     if os.path.exists(cache_file):
-        with open(cache_file, 'r') as file:
+        with open(cache_file, "r") as file:
             cache = json.load(file)
             debug(f"gguf_reference_cache=\n{cache}")
             result = get_deep_value(cache, repo_id, quantization)
             return result
 
+
 # helper function
 def cache_gguf_filename(repo_id: str, quantization: str, result: str) -> None:
     cache = {}
-    cache_file = f"{Path(__file__).resolve().parent.parent.parent}/.gguf_reference_cache"
+    cache_file = (
+        f"{Path(__file__).resolve().parent.parent.parent}/.gguf_reference_cache"
+    )
     if os.path.exists(cache_file):
-        with open(cache_file, 'r') as file:
+        with open(cache_file, "r") as file:
             cache = json.load(file)
     set_deep_value(cache, result, repo_id, quantization)
-    with open(cache_file, 'w') as json_file:
+    with open(cache_file, "w") as json_file:
         json.dump(cache, json_file, indent=2)
 
+
 # helper function
-def default_thinking_value(model_name: str, minimize_thinking: bool) -> bool | Literal['low', 'medium', 'high']:
+def default_thinking_value(
+    model_name: str, minimize_thinking: bool
+) -> bool | Literal["low", "medium", "high"]:
     """Set the thinking parameter appropriately considering model name and possible minimize-thinking directive"""
     if "gpt-oss" in model_name:
-        return 'low' if minimize_thinking else 'medium'
+        return "low" if minimize_thinking else "medium"
     else:
         return False if minimize_thinking else True
-
 
 
 class Model(ABC):
@@ -109,9 +121,9 @@ class Model(ABC):
 
     def __init__(
         self,
-        model_name: str, # Selected LLM model
-        params: dict, # setting of non-default parameters to pass to llm provider
-        endpoint: str = "http://localhost:11434", # ollama server endpoint
+        model_name: str,  # Selected LLM model
+        params: dict,  # setting of non-default parameters to pass to llm provider
+        endpoint: str = "http://localhost:11434",  # ollama server endpoint
         minimize_thinking: bool = False,
     ) -> None:
         self.model_name = model_name
@@ -123,26 +135,37 @@ class Model(ABC):
             self.warm_up_model()
             info("...done.")
         else:
-            sys.exit((
-                f"\nERROR: Model {self.model_name} is not being served at {endpoint}.  "
-                "Check that you have the correct endpoint and model name."
-            ))
-        self.stats = ModelStats(model_metadata={"model_name": model_name, "params": params, "endpoint": endpoint, "minimize_thinking": minimize_thinking})
+            sys.exit(
+                (
+                    f"\nERROR: Model {self.model_name} is not being served at {endpoint}.  "
+                    "Check that you have the correct endpoint and model name."
+                )
+            )
+        self.stats = ModelStats(
+            model_metadata={
+                "model_name": model_name,
+                "params": params,
+                "endpoint": endpoint,
+                "minimize_thinking": minimize_thinking,
+            }
+        )
         atexit.register(self.at_exit)
-
 
     @staticmethod
     def create(
         llm_server_spec: ServedLLM,
         model_params: dict = {},
-        minimize_thinking:bool = False,
+        minimize_thinking: bool = False,
     ) -> "Model":
         """
         Model factory, creating a concrete subclass of Model according to spec,
         side-effecing the spec to fill in any args that were missing
         """
         # LLM particulars
-        kwargs : dict[str,Any] = { "params": model_params, "minimize_thinking": minimize_thinking }
+        kwargs: dict[str, Any] = {
+            "params": model_params,
+            "minimize_thinking": minimize_thinking,
+        }
         model = None
         # Pass {model_name, endpoint} parameters only if user has specified the non-default (non-empty) values
         #  since Model (and offspring) classes themselves specify their own default values umbenounced to Agent()
@@ -150,8 +173,12 @@ class Model(ABC):
             kwargs["model_name"] = llm_server_spec.model_name
         if llm_server_spec.model_endpoint:
             kwargs["endpoint"] = llm_server_spec.model_endpoint
-        if llm_server_spec.model_path and (llm_server_spec.model_provider != "llama.cpp"):
-            sys.exit("\nError: model-path can only be specified when selecting llama.cpp as the provider.\n\n")
+        if llm_server_spec.model_path and (
+            llm_server_spec.model_provider != "llama.cpp"
+        ):
+            sys.exit(
+                "\nError: model-path can only be specified when selecting llama.cpp as the provider.\n\n"
+            )
         # use the appropriate constructor depending on provider
         if llm_server_spec.model_provider == "vllm":
             model = VLLMModel(**kwargs)
@@ -167,7 +194,6 @@ class Model(ABC):
         llm_server_spec.model_endpoint = model.endpoint
         return model
 
-
     @abstractmethod
     def is_model_served(self) -> bool:
         pass
@@ -175,8 +201,8 @@ class Model(ABC):
     def warm_up_model(self) -> None:
         """Dummy inference call to trigger ollama to load model into memory"""
         response = self.generate_chat_response(
-            [ {"role": "user", "content": "Introduce yourself."} ],
-            stream = False,
+            [{"role": "user", "content": "Introduce yourself."}],
+            stream=False,
         )
         debug(response)
 
@@ -184,32 +210,37 @@ class Model(ABC):
     def generate_chat_response(
         self,
         messages: list,
-        structured_output = None,
+        structured_output=None,
         tools: list = [],
         stream: bool = True,
-        thinking: bool | Literal['low', 'medium', 'high'] | None = None, # {low, medium, high} only supported by gpt-oss
+        thinking: bool
+        | Literal["low", "medium", "high"]
+        | None = None,  # {low, medium, high} only supported by gpt-oss
     ) -> ollama.ChatResponse | Iterator[ollama.ChatResponse] | ChatCompletion:
         pass
 
-
-    def record_stats(self, response: ollama.ChatResponse | None, time_to_first_token: int, time_to_first_nonthinking_token: int):
+    def record_stats(
+        self,
+        response: ollama.ChatResponse | None,
+        time_to_first_token: int,
+        time_to_first_nonthinking_token: int,
+    ):
         if response:
             self.stats.append(
-                time_to_first_token = time_to_first_token/1_000_000_000,
-                time_to_first_nonthinking_token = time_to_first_nonthinking_token/1_000_000_000,
-                prompt_parsing_time = response["prompt_eval_duration"]/1_000_000_000,
-                generation_time = response["eval_duration"]/1_000_000_000,
-                response_time = response["total_duration"]/1_000_000_000,
-                num_input_tokens = response["prompt_eval_count"],
-                num_output_tokens = response["eval_count"],
+                time_to_first_token=time_to_first_token / 1_000_000_000,
+                time_to_first_nonthinking_token=time_to_first_nonthinking_token
+                / 1_000_000_000,
+                prompt_parsing_time=response["prompt_eval_duration"] / 1_000_000_000,
+                generation_time=response["eval_duration"] / 1_000_000_000,
+                response_time=response["total_duration"] / 1_000_000_000,
+                num_input_tokens=response["prompt_eval_count"],
+                num_output_tokens=response["eval_count"],
             )
-
 
     def at_exit(self):
         info(f"Computing overall inference stats for {self.model_name}...")
         self.stats.compute()
         info(pformat(self.stats.stats))
-
 
     @staticmethod
     @abstractmethod
@@ -231,22 +262,37 @@ class Model(ABC):
         tool_results: dict = {},
     ) -> list:
         for key, response in tool_results.items():
-            tool_name, tool_call_id, _ = key # note: keys take the form of (tool_name, id, frozenset(arguments))
-            content = response.get('content')
-            if isinstance(content, dict):
-                content = json.dumps(content)
-            elif not isinstance(content, str):
-                raise AttributeError(f"Model.extend_messages_with_tool_responses() processing tool call result of unsupported type {type(content)}")
-            content_or_error: str = content or f"Error: {response.get('error')}" or "Unspecfied error occurred"
-            messages.append({
-                'role': 'tool',
-                'tool_call_id': tool_call_id,
-                'name': tool_name,
-                'content': content_or_error,
-            })
+            # note: keys take the form of (tool_name, id, json_string_of_arguments)
+            # - inclusion of the arguments in the tool response appears not to be standar practie
+            #   but one should take care that the agent doesn't get into a situation where it calls 
+            #   a tools with multiple argument varations on the same turn and then can't disambiguate
+            #   the results.  The best mitigation is probably to be explicit in the format of the content
+            #   returned by the tool
+            tool_name, tool_call_id, _ = key
+            content: Any = response.get("content") or response.get("error")
+            if not isinstance(content, str):
+                try:
+                    content = json.dumps(content)
+                except json.JSONDecodeError:
+                    raise ValueError(
+                        f"Model.extend_messages_with_tool_responses() encountered unserializiable tool result {content} of type {type(content)}"
+                    )
+            # TODO: consider swapping the order of the or clauses below
+            content_or_error: str = (
+                content
+                or f"Error: {response.get('error')}"
+                or "Unspecfied error occurred"
+            )
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "name": tool_name,
+                    "content": content_or_error,
+                }
+            )
             # TODO: tweaks for other model families, e.g., function insead of tool?
         return messages
-
 
 
 class OllamaModel(Model):
@@ -254,9 +300,9 @@ class OllamaModel(Model):
 
     def __init__(
         self,
-        model_name: str = "qwen3:8b", # "gpt-oss:latest", # Selected LLM model
-        params: dict = {}, # setting of non-default parameters to pass to llm provider
-        endpoint: str = "http://localhost:11434", # ollama server endpoint
+        model_name: str = "qwen3:8b",  # "gpt-oss:latest", # Selected LLM model
+        params: dict = {},  # setting of non-default parameters to pass to llm provider
+        endpoint: str = "http://localhost:11434",  # ollama server endpoint
         minimize_thinking: bool = False,
     ) -> None:
         info("Initializing Ollama client...")
@@ -269,7 +315,6 @@ class OllamaModel(Model):
         # finish initializing, including model warmup
         super().__init__(model_name, params, endpoint, minimize_thinking)
 
-
     def is_model_served(self) -> bool:
         """Sanity check that model is actually served"""
         try:
@@ -278,15 +323,16 @@ class OllamaModel(Model):
         except Exception:
             return False
 
-
     def generate_chat_response(
         self,
         messages: list,
-        structured_output = None,
+        structured_output=None,
         tools: list = [],
         stream: bool = True,
-        thinking: bool | Literal['low', 'medium', 'high'] | None = None, # {low, medium, high} only supported by gpt-oss
-        max_context_length: int = 8912, #32768,
+        thinking: bool
+        | Literal["low", "medium", "high"]
+        | None = None,  # {low, medium, high} only supported by gpt-oss
+        max_context_length: int = 8912,  # 32768,
     ) -> ollama.ChatResponse | Iterator[ollama.ChatResponse]:
         """Standard chat-completion inference call"""
         debug("Inference call...")
@@ -309,9 +355,8 @@ class OllamaModel(Model):
             tools=tools,
             think=thinking_value,
             stream=stream,
-            options = {"num_ctx": max_context_length}
+            options={"num_ctx": max_context_length},
         )
-
 
     @staticmethod
     def accumulate_streaming_response_chunks(
@@ -328,16 +373,17 @@ class OllamaModel(Model):
             a = running_accumulation.message
             b = new_chunk.message
             if a.thinking or b.thinking:
-                newly_accumulated_response.message.thinking = \
-                    f"{a.thinking if a.thinking else ''}{b.thinking if b.thinking else ''}"
+                newly_accumulated_response.message.thinking = f"{a.thinking if a.thinking else ''}{b.thinking if b.thinking else ''}"
             if a.content or b.content:
-                newly_accumulated_response.message.content = \
+                newly_accumulated_response.message.content = (
                     f"{a.content if a.content else ''}{b.content if b.content else ''}"
+                )
             if a.tool_calls or b.tool_calls:
-                combined_iterator = itertools.chain.from_iterable(filter(None, [a.tool_calls, b.tool_calls]))
+                combined_iterator = itertools.chain.from_iterable(
+                    filter(None, [a.tool_calls, b.tool_calls])
+                )
                 newly_accumulated_response.message.tool_calls = list(combined_iterator)
         return newly_accumulated_response, new_chunk
-
 
 
 class ModelServedWithOpenAICompatibleAPI(Model):
@@ -345,9 +391,9 @@ class ModelServedWithOpenAICompatibleAPI(Model):
 
     def __init__(
         self,
-        model_name: str = "JunHowie/Qwen3-8B-GPTQ-Int4", # Selected LLM model
-        params: dict = {}, # setting of non-default parameters to pass to llm provider
-        endpoint: str = "http://localhost:8000/v1", # ollama server endpoint
+        model_name: str = "JunHowie/Qwen3-8B-GPTQ-Int4",  # Selected LLM model
+        params: dict = {},  # setting of non-default parameters to pass to llm provider
+        endpoint: str = "http://localhost:8000/v1",  # ollama server endpoint
         minimize_thinking: bool = False,
     ) -> None:
         info("Initializing openAI client...")
@@ -359,7 +405,6 @@ class ModelServedWithOpenAICompatibleAPI(Model):
         # TODO: handle remaining params
         # finish initializing, including model warmup
         super().__init__(model_name, params, endpoint, minimize_thinking)
-
 
     def is_model_served(self) -> bool:
         """Sanity check that model is actually served"""
@@ -374,29 +419,34 @@ class ModelServedWithOpenAICompatibleAPI(Model):
         except Exception:
             return False
 
-
     def generate_chat_response(
         self,
         messages: list,
-        structured_output = None,
+        structured_output=None,
         tools: list = [],
         stream: bool = True,
-        thinking: bool | Literal['low', 'medium', 'high'] | None = None, # {low, medium, high} only supported by gpt-oss
-        prescribed_tool = None, #: ChatCompletionToolChoiceOptionParam | None = None, -> tool_choice
-        verbosity: Literal['low', 'medium', 'high'] | None = 'low', # for gptoss
+        thinking: bool
+        | Literal["low", "medium", "high"]
+        | None = None,  # {low, medium, high} only supported by gpt-oss
+        prescribed_tool=None,  #: ChatCompletionToolChoiceOptionParam | None = None, -> tool_choice
+        verbosity: Literal["low", "medium", "high"] | None = "low",  # for gptoss
         # thinking (True/False for Qwen, or reasoning_effort for gptoss, which goes into sampling_params)
         # response_format = json_schema ({ "type": "json_schema", "json_schema": {...} }) or json_object (A Pydantic model)
         # # https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html#extra-parameters_1
         # # https://platform.openai.com/docs/api-reference/chat/get
         # # https://llama-cpp-python.readthedocs.io/en/latest/api-reference/#llama_cpp.Llama.create_chat_completion
-    ): # -> ChatCompletion | list:
+    ):  # -> ChatCompletion | list:
         """Standard chat-completion inference call"""
         debug("Inference call...")
         thinking_value = default_thinking_value(self.model_name, self.minimize_thinking)
         if thinking != None:
             thinking_value = thinking
         chat_template_kwargs = {
-            ("enable_thinking" if isinstance(thinking_value, bool) else "reasoning_effort"): thinking_value,
+            (
+                "enable_thinking"
+                if isinstance(thinking_value, bool)
+                else "reasoning_effort"
+            ): thinking_value,
         }
         if verbosity:
             chat_template_kwargs["verbosity"] = verbosity
@@ -404,9 +454,9 @@ class ModelServedWithOpenAICompatibleAPI(Model):
             "model": self.model_name,
             "messages": messages,
             "tools": tools,
-            "stream" : stream,
-            "stream_options" : {"include_usage": True} if stream else None,
-            "frequency_penalty": 1.0, # avoid repetition
+            "stream": stream,
+            "stream_options": {"include_usage": True} if stream else None,
+            "frequency_penalty": 1.0,  # avoid repetition
             "extra_body": {"chat_template_kwargs": chat_template_kwargs},
         }
         if structured_output:
@@ -416,7 +466,6 @@ class ModelServedWithOpenAICompatibleAPI(Model):
             kwargs["tool_choice"] = prescribed_tool
         debug_pp(kwargs)
         return self.client.chat.completions.create(**kwargs)
-
 
     @staticmethod
     def accumulate_streaming_response_chunks(
@@ -430,18 +479,25 @@ class ModelServedWithOpenAICompatibleAPI(Model):
         """
 
         # translate the new chunk into an equivalent ollama ChatResponse object
-        new_message = ollama.Message(role='assistant')
+        new_message = ollama.Message(role="assistant")
         if new_chunk.choices:
-            new_message.thinking = getattr(new_chunk.choices[0].delta, "reasoning_content", "")
+            new_message.thinking = getattr(
+                new_chunk.choices[0].delta, "reasoning_content", ""
+            )
             new_message.content = getattr(new_chunk.choices[0].delta, "content", "")
-            new_message.tool_calls = getattr(new_chunk.choices[0].delta, "tool_calls", [])
+            new_message.tool_calls = getattr(
+                new_chunk.choices[0].delta, "tool_calls", []
+            )
             # ensure that there remains a json string even in the absence of tool arguments
-            if new_message.tool_calls and not new_message.tool_calls[0].function.arguments:
-                new_message.tool_calls[0].function.arguments = "{}" # type: ignore
+            if (
+                new_message.tool_calls
+                and not new_message.tool_calls[0].function.arguments
+            ):
+                new_message.tool_calls[0].function.arguments = "{}"  # type: ignore
         kwargs = {
             "model": f"{new_chunk.model}",
             "message": new_message,
-            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000000-00:00")
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000000-00:00"),
         }
         # include stats
         kwargs["total_duration"] = time_consumed
@@ -449,7 +505,7 @@ class ModelServedWithOpenAICompatibleAPI(Model):
         kwargs["prompt_eval_duration"] = load_and_prompt_eval_duration
         if time_consumed:
             kwargs["eval_duration"] = time_consumed - load_and_prompt_eval_duration
-        #debug(f"new_chunk: {new_chunk}")
+        # debug(f"new_chunk: {new_chunk}")
         if new_chunk.usage:
             kwargs["prompt_eval_count"] = new_chunk.usage.prompt_tokens
             kwargs["eval_count"] = new_chunk.usage.completion_tokens
@@ -459,9 +515,11 @@ class ModelServedWithOpenAICompatibleAPI(Model):
         new_chunk_as_ollama_response = ollama.ChatResponse(**kwargs)
 
         # simply accumulate using OllamaModel's staticmethod
-        newly_accumulated_response, _ = OllamaModel.accumulate_streaming_response_chunks(
-            new_chunk_as_ollama_response,
-            running_accumulation = running_accumulation,
+        newly_accumulated_response, _ = (
+            OllamaModel.accumulate_streaming_response_chunks(
+                new_chunk_as_ollama_response,
+                running_accumulation=running_accumulation,
+            )
         )
 
         # caveat: each tool calls streamed by vllm may get split up into into function-argument
@@ -470,9 +528,7 @@ class ModelServedWithOpenAICompatibleAPI(Model):
             assert isinstance(newly_accumulated_response.message.tool_calls, list)
             remerge_chunked_tool_calls(newly_accumulated_response.message.tool_calls)
 
-
         return newly_accumulated_response, new_chunk_as_ollama_response
-
 
 
 class VLLMModel(ModelServedWithOpenAICompatibleAPI):
@@ -480,9 +536,9 @@ class VLLMModel(ModelServedWithOpenAICompatibleAPI):
 
     def __init__(
         self,
-        model_name: str = "JunHowie/Qwen3-8B-GPTQ-Int4", # Selected LLM model
-        params: dict = {}, # setting of non-default parameters to pass to llm provider
-        endpoint: str = "http://localhost:8000/v1", # ollama server endpoint
+        model_name: str = "JunHowie/Qwen3-8B-GPTQ-Int4",  # Selected LLM model
+        params: dict = {},  # setting of non-default parameters to pass to llm provider
+        endpoint: str = "http://localhost:8000/v1",  # ollama server endpoint
         minimize_thinking: bool = False,
     ) -> None:
         info("VLLM selected as provider...")
@@ -490,15 +546,14 @@ class VLLMModel(ModelServedWithOpenAICompatibleAPI):
         super().__init__(model_name, params, endpoint, minimize_thinking)
 
 
-
 class LlamaCppModel(ModelServedWithOpenAICompatibleAPI):
     """Llamacpp-served Model"""
 
     def __init__(
         self,
-        model_name: str = "unsloth/Qwen3-8B-GGUF:Q4_K_M", # "gpt-oss:latest", # Selected LLM model
-        params: dict = {}, # setting of non-default parameters to pass to llm provider
-        endpoint: str = "http://localhost:8080/v1", # ollama server endpoint
+        model_name: str = "unsloth/Qwen3-8B-GGUF:Q4_K_M",  # "gpt-oss:latest", # Selected LLM model
+        params: dict = {},  # setting of non-default parameters to pass to llm provider
+        endpoint: str = "http://localhost:8080/v1",  # ollama server endpoint
         model_path: str | None = None,
         minimize_thinking: bool = False,
     ) -> None:

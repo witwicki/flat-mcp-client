@@ -162,22 +162,28 @@ class MCPToolbox(Toolbox):
                     return output.structured_content
                 self._registered_functions[mcp_tool.name] = wrapped_function
 
-    async def call(self, tool: str, arguments: dict) -> dict:
+    async def call(self, tool: str, arguments: dict) -> dict[str, str|int|float|dict[str, str|int|float]]:
         """ Call a tool by the corresponding function name"""
         try:
             if tool not in self._registered_functions:
                 raise AttributeError(f"There is no tool {tool} in our {id} toolbox")
             else:
                 async with self._mcp_client as client:
-                    output = await client.call_tool(tool, arguments)
-                    if getattr(output, 'data') and output.data: # FastMCP style
-                        output = output.data
-                    elif getattr(output, 'structured_content') and output.structured_content:
-                        output = output.structured_content
-                    else:
-                        output = output.content[0].text # type: ignore
-                    print(f"\n\033[90m--> output of tool call: {output}\033[0m")
-                    return {"content": output}
+                    try:
+                        output = await client.call_tool(tool, arguments)
+                        print(output)
+                        if getattr(output, 'data') and output.data: # FastMCP style
+                            output = output.data
+                        elif getattr(output, 'structured_content') and output.structured_content:
+                            output = output.structured_content
+                        else:
+                            output = output.content[0].text # type: ignore
+                        print(f"\n\033[90m--> output of tool call: {output}\033[0m")
+                        return {"content": output}
+                    except fastmcp.exceptions.ToolError as e:
+                        print(f"\n\033[90m--> tool call ecountered error: {e}\033[0m")
+                        return {"error": str(e)}
+                    
         except Exception as e:
             traceback.print_exc()
             return {"error": f"Error calling {tool}: {str(e)}"}
@@ -222,14 +228,28 @@ class Workshop:
             self._tool_definitions[function_name] = tb.get_tool_definition(function_name)
 
     async def setup_toolboxes(self, toolboxes: list[str], tool_kwargs: dict) -> None:
-        """ prepare all necessary tools from a tuple of strings referencing to tool_definitions """
+        """Prepare all necessary tools from a list of strings referencing tool_definitions
+
+        Args:
+            toolboxes (list[str]): List of short names for tool definitions. The system will search for each in this order:
+                1. {calling_package}.tool_defs.{name} (your project's tools)
+                2. flat_mcp_client.tool_defs.{name} (built-in tools)
+            tool_kwargs (dict): Dictionary of parameters to pass to each Toolbox constructor
+        """
         from .tool_defs import create_toolbox
         for name in toolboxes:
             tb = create_toolbox(name, tool_kwargs)
             self._add_toolbox(tb)
 
     async def connect_with_mcp_servers(self, mcp_servers: list[str], served_llm: ServedLLM) -> None:
-        """ add in tools and resources praovided by a dictionary of mcp serves mapped to subsets of item to include"""
+        """Add in tools and resources provided by MCP servers
+
+        Args:
+            mcp_servers (list[str]): List of short names for MCP reference modules. The system will search for each in this order:
+                1. {calling_package}.mcp_refs.{name} (your project's MCP refs)
+                2. flat_mcp_client.mcp_refs.{name} (built-in MCP refs)
+            served_llm (ServedLLM): The LLM instance to use for MCP sampling operations
+        """
         from .mcp_refs import create_mcp_toolbox
         for name in mcp_servers:
             tb = await create_mcp_toolbox(name, served_llm)
