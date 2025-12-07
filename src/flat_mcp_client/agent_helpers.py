@@ -1,26 +1,7 @@
-from typing import Literal, Optional, Any
+from typing import Any
 from collections.abc import Mapping
 import string
 import random
-from dataclasses import dataclass
-
-# USEFUL STRING LITERALS
-ModelProvider = Literal["ollama", "vllm", "llama.cpp"]
-TerminationCondition = Literal[
-    "inference_call_completed",
-    "nonempty_response_content",
-    "no_further_tool_calls",
-    "self_determined_termination"
-]
-
-
-# USEFUL DATACLASS
-@dataclass
-class ServedLLM:
-    model_provider: ModelProvider = "ollama"
-    model_endpoint: Optional[str] = None
-    model_name: Optional[str] = None
-    model_path: Optional[str] = None # option to specify path to local file in the case of llama.cpp
 
 
 # HELPER FUNCTIONS

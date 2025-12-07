@@ -11,7 +11,7 @@ import os
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 import transformers.utils.chat_template_utils as transformers_utils
 
-from .agent_helpers import ServedLLM
+from . import ServedLLM
 
 
 class Toolbox(ABC):

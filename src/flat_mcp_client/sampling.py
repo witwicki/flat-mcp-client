@@ -5,8 +5,9 @@ from fastmcp.client.sampling import (
 from mcp.types import TextContent
 from mcp.shared.context import RequestContext
 from flat_mcp_client import info, debug, debug_pp
+from . import ServedLLM
 from .agents import Agent
-from .agent_helpers import ServedLLM, is_substring_ignoring_case_and_special_characters, deep_merge
+from .agent_helpers import is_substring_ignoring_case_and_special_characters, deep_merge
 
 
 

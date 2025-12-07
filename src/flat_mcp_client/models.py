@@ -18,8 +18,8 @@ from openai import OpenAI
 from openai.types.chat import ChatCompletion
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 
-from . import debug, debug_pp, info
-from .agent_helpers import ServedLLM, get_deep_value, set_deep_value
+from . import ServedLLM, debug, debug_pp, info
+from .agent_helpers import get_deep_value, set_deep_value
 from .prompts import just_json_schema
 from .stats import ModelStats
 

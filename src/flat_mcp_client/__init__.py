@@ -1,9 +1,29 @@
+from typing import Literal
 import sys
 import os
 import datetime
 import logging
 import colorlog
 from pprint import pformat
+from dataclasses import dataclass
+
+
+# USEFUL STRING LITERALS
+ModelProvider = Literal["ollama", "vllm", "llama.cpp"]
+TerminationCondition = Literal[
+    "inference_call_completed",
+    "nonempty_response_content",
+    "no_further_tool_calls",
+    "self_determined_termination"
+]
+
+# USEFUL DATACLASS
+@dataclass
+class ServedLLM:
+    model_provider: ModelProvider = "ollama"
+    model_endpoint: str|None = None
+    model_name: str|None = None
+    model_path: str|None = None # option to specify path to local file in the case of llama.cpp
 
 # COLORFUL LOGGNG
 init_timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -48,6 +68,9 @@ def init_logger(log_level: int = logging.INFO):
     log_file_handler.setFormatter(logging.Formatter('[%(asctime)s] %(name)s : (%(levelname)s) %(message)s'))
     log_file_handler.setLevel(logging.DEBUG)
     package_logger.addHandler(log_file_handler)
+    
+def enable_verbose_debug_output():
+    init_logger(logging.DEBUG)
 
 def info(msg) -> None:
     print(msg) # print to screen
@@ -65,7 +88,7 @@ def warning(msg) -> None:
 def error(msg) -> None:
     package_logger.error(msg)
 
-
+# AFFORDANCE FOR IMPORTING THIS LIBRARY FOR USE IN OTHER PROJECTS
 def _get_calling_package() -> str | None:
     """Inspect the call stack to determine the calling package (not flat_mcp_client).
 

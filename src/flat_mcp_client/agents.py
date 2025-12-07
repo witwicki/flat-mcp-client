@@ -9,13 +9,18 @@ from typing import Annotated, Any, Optional, cast, get_args
 import cyclopts
 import ollama
 
-from . import debug, debug_pp, error, info, init_logger, _get_calling_package
-from .agent_helpers import (
+from . import (
     ModelProvider,
     ServedLLM,
     TerminationCondition,
-    generate_random_id,
+    debug, 
+    debug_pp, 
+    error, 
+    info, 
+    init_logger, 
+    _get_calling_package
 )
+from .agent_helpers import generate_random_id
 from .io.ui import HumanInterface
 from .mcp_refs import ExistingMCPReferenceNames
 from .models import Model
@@ -195,7 +200,7 @@ class Agent:
         # interface
         self.io = HumanInterface()
 
-    async def init_workshop(
+    async def equip(
         self,
         mcp_servers: list[str] = [],
         tool_collections: list[str] = [],
@@ -489,7 +494,7 @@ async def chatloop(
     tool_kwargs = {
         "llm": llm,
     }
-    await agent.init_workshop(
+    await agent.equip(
         mcp_servers=mcps, tool_collections=tools, tool_kwargs=tool_kwargs
     )
     info("...initialization complete.\n")
