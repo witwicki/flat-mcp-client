@@ -1,6 +1,8 @@
 # flat-mcp-client
 *F*ast *L*ocal *A*gents with *T*ools (mcp-client edition) is a lightweight package for connecting local (self-hosted) LLMs to tooling+data and for prototyping agentic flows.  The philosophy behind this codebase is streamlined invocation of standard inferencing APIs (ollama, vllm, llama.cpp via OpenAI interface compatibility) without relying on other agent frameworks!
 
+Run this code directly _or_ import **flat_mcp_client** into your own project!
+
 ## How fast?
 
 Benchmarking a query requiring a sequence of multiple tool calls followed by a summary of a weather forecast, here are results of flat optimized on an _RTX 4090 laptop GPU_:
@@ -55,6 +57,63 @@ MCP servers are prescribed in the same way that tools are.  See one example at `
 
 - Streaming console output, including streaming of the tool calls made by LLMs served by vLLM and llama.cpp
 - Flexible agentic flow with one of several predefined turn termination conditions (e.g., `no further tool calls` will allow an agent to automatically chain tools and only stop once it has finished calling tools or a maximum number of inference calls has been reached)
+- [*~NEW~*] Can be imported into projects that define custom agents with custom tools 
+
+## How to import and effectively use this as an SDK
+
+```python
+import flat_mcp_client
+from flat_mcp_client.agents import Agent
+
+"""
+Example: Using flat-mcp-client with custom tools from your own project
+
+Project Structure:
+  your_project/
+  ├── __init__.py
+  ├── main.py
+  ├── prompts/
+  │   ├── __init__.py
+  │   └── special_prompt.py  # Your custom prompt
+  ├── tool_defs/
+  │   ├── __init__.py
+  │   └── calculator.py  # Your custom toolbox
+  ├── mcp_refs/
+  │   ├── __init__.py
+  │   └── mcp_config_of_your_choosing.py  # Your custom mcp config
+  └── (your other code)
+"""
+
+
+async def main():
+    """Example: Using custom tools with an Agent"""
+
+    # Uncomment this you want to enable very verbose debug output from flat_mcp_client
+    # flat_mcp_client.enable_verbose_debug_output()
+
+    print("\nCreating an Agent with custom tools...")
+    llm = flat_mcp_client.ServedLLM(model_provider="ollama", model_name="gpt-oss:20b")
+    agent = Agent(
+        name="your_agent",
+        prompt_name="special_prompt",
+        llm=llm,
+        turn_termination_condition="no_further_tool_calls",
+        minimize_thinking=True,
+    )
+
+    # Initialize workshop with both short names (built-in) and fully qualified paths (external)
+    print("Initializing workshop with mixed tool collections...")
+    await agent.equip(
+        tool_collections=[
+            "time_and_date",  # Built-in tool (short name)
+            "calculator",  # External tool (fully qualified path)
+        ],
+        mcp_servers=[
+            "mcp_config_of_your_choosing",
+        ],
+    )
+    await agent.chat()
+```
 
 ## Wishlist
 - [x] MCP sampling
