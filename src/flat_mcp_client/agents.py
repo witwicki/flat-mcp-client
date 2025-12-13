@@ -402,22 +402,31 @@ class Agent:
         else:
             return "", "", []
 
-    async def chat(self) -> None:
+    async def chat(self, agent_starts: bool = False) -> None:
         """simple turn-by-turn chat between user and agent"""
 
         user_terminated_session = False
+        conversation_underway = False
+        user_prompt = None
         while not user_terminated_session:
+            # AGENT'S TURN
+            if agent_starts or conversation_underway:
+                # reload system prompt (handy for live editing)
+                self.context.reload_system_prompt_and_structured_output()
+                response_content, _, _, _ = await self.agentic_response(user_prompt)
+            
             # USER'S TURN
             user_prompt = self.io.get_user_input()  # blocking
+            conversation_underway = True
+
+            # TODO: write chat history to disk
+            
+            # END OF CONVERSATION?
             if user_prompt.lower() in ["bye", "goodbye", "/bye", "quit", "exit"]:
                 user_terminated_session = True  # Connection closed
                 break
-
-            # AGENT'S TURN
-            # reload system prompt (handy for live editing)
-            self.context.reload_system_prompt_and_structured_output()
-            response_content, _, _, _ = await self.agentic_response(user_prompt)
-        # TODO: write chat history to disk
+    
+            
 
 
 ### CLI ENTRY POINT ###
@@ -433,7 +442,6 @@ tool_args_group = cyclopts.Group(
     default_parameter=cyclopts.Parameter(negative=()),  # Disable "--no-" flags
     validator=cyclopts.validators.LimitedChoice(),  # Mutually Exclusive Options
 )
-
 
 @app.command
 async def chatloop(
