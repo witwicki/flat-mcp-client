@@ -10,7 +10,7 @@ from flat_mcp_client import debug, debug_pp
 
 
 # CUSTOM TOOL DEFINITIONS
-specific_tool_definitions  = [
+specific_tool_definitions: list[dict[str, object]] = [
     {
         "type": "function",
         "function": {
@@ -80,10 +80,10 @@ class GeolocalInfoToolbox(Toolbox):
     """
 
     # class variable to store location results by ip
-    cached_ip_results = {}
+    cached_ip_results: dict[str, dict[str, object]] = {}
 
     # class variable for the openmeteo session
-    openmeteocache_session = requests_cache.CachedSession('.cache', expire_after = 3600)
+    openmeteocache_session: requests_cache.CachedSession = requests_cache.CachedSession('.cache', expire_after = 3600)
 
     # and two helper methods
     @staticmethod
@@ -93,15 +93,14 @@ class GeolocalInfoToolbox(Toolbox):
         """
         url = 'https://api.ipify.org?format=json'
         response = requests.get(url)
-
         if response.status_code == 200:
-            data = response.json()
-            return data['ip']
-        else:
-            return None
+            data: dict[str, object] = response.json()  # type: ignore[assignment]  # pyright: ignore[reportAny]
+            ip_obj = data.get("ip")
+            return ip_obj if isinstance(ip_obj, str) else None
+        return None
 
     @classmethod
-    def get_ip_result(cls) -> dict:
+    def get_ip_result(cls) -> dict[str, object]:
         """Call ipify's API to get location data from
         public IP address, using cached results when possible
         """
@@ -110,31 +109,31 @@ class GeolocalInfoToolbox(Toolbox):
             return {"error": "connection error"}
         else:
             # use cached result if available
-            data = {}
+            ip_data: dict[str, object] = {}
             if ip in cls.cached_ip_results:
-                data = cls.cached_ip_results[ip]
+                ip_data = cls.cached_ip_results[ip]
                 debug("Retrieved cached result: \n")
-                debug_pp(data)
-                return data
+                debug_pp(ip_data)
+                return ip_data
             else:
                 url = f'http://ip-api.com/json/{ip}'
                 response = requests.get(url)
                 if response.status_code != 200:
                     return {"error": f"Status code: {response.status_code}"}
                 else:
-                    data = response.json()
+                    ip_data = response.json()  # type: ignore[assignment]  # pyright: ignore[reportAny]
                     debug("Received API response as: \n")
-                    debug_pp(data)
-                    cls.cached_ip_results[ip] = data
-                    return data
+                    debug_pp(ip_data)
+                    cls.cached_ip_results[ip] = ip_data
+                    return ip_data
 
     @classmethod
     @implements_tool
-    def estimate_gps_coordinates(cls) -> dict:
+    def estimate_gps_coordinates(cls) -> dict[str, object]:
         """Get {latitude, longitude} by querying ipify's API
         """
-        data: dict = cls.get_ip_result()
-        if (not "lat" in data) or (not "lon" in data):
+        data: dict[str, object] = cls.get_ip_result()
+        if ("lat" not in data) or ("lon" not in data):
             if "error" in data:
                 return data
             else:
@@ -147,11 +146,11 @@ class GeolocalInfoToolbox(Toolbox):
 
     @classmethod
     @implements_tool
-    def get_current_city(cls):
+    def get_current_city(cls) -> dict[str, object]:
         """Get city, region name by querying ipify's API
         """
-        data: dict = cls.get_ip_result()
-        if (not "city" in data) or (not "regionName" in data):
+        data: dict[str, object] = cls.get_ip_result()
+        if ("city" not in data) or ("regionName" not in data):
             if "error" in data:
                 return data
             else:
@@ -161,7 +160,7 @@ class GeolocalInfoToolbox(Toolbox):
 
     @classmethod
     @implements_tool
-    def get_todays_weather_forecast(cls, latitude: float, longitude: float) -> dict:
+    def get_todays_weather_forecast(cls, latitude: float, longitude: float) -> dict[str, object]:
         """Get today's hour-by-hour weather forecast by querying openmeteo
         with the desired location in <lat,lon> coordinates
         """
@@ -177,13 +176,17 @@ class GeolocalInfoToolbox(Toolbox):
            	"start_date": today,
            	"end_date": today,
         }
-        response = cls.openmeteocache_session.get(url, params=params)
-        result = response.json()
-        return result["hourly"]
+        response = cls.openmeteocache_session.get(url, params=params)  # pyright: ignore[reportUnknownMemberType]
+        result: dict[str, object] = response.json()  # type: ignore[assignment]  # pyright: ignore[reportAny]
+        hourly = result.get("hourly")
+        if isinstance(hourly, dict):
+            hourly_dict: dict[str, object] = hourly  # pyright: ignore[reportUnknownVariableType]
+            return hourly_dict
+        return {"error": "Unexpected response payload"}
 
     @classmethod
     @implements_tool
-    def get_future_weather_forecast(cls, latitude: float, longitude: float, date: str) -> dict:
+    def get_future_weather_forecast(cls, latitude: float, longitude: float, date: str) -> dict[str, object]:
         """Get the future hour-by-hour weather forecast by querying openmeteo
         with the date in YY-MM-DD format and the location in <lat,lon> coordinates
 
@@ -203,6 +206,10 @@ class GeolocalInfoToolbox(Toolbox):
            	"start_date": date,
            	"end_date": date,
         }
-        response = cls.openmeteocache_session.get(url, params=params)
-        result = response.json()
-        return result["hourly"]
+        response = cls.openmeteocache_session.get(url, params=params)  # pyright: ignore[reportUnknownMemberType]
+        result: dict[str, object] = response.json()  # type: ignore[assignment]  # pyright: ignore[reportAny]
+        hourly = result.get("hourly")
+        if isinstance(hourly, dict):
+            hourly_dict: dict[str, object] = hourly  # pyright: ignore[reportUnknownVariableType]
+            return hourly_dict
+        return {"error": "Unexpected response payload"}

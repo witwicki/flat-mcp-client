@@ -1,17 +1,28 @@
+from __future__ import annotations
+
 import inspect
-from typing import Callable
+from collections.abc import Callable
+from typing import Any, TypeAlias
+from typing_extensions import override
 from abc import ABC
 import traceback
 
 from ollama import Tool
 from mcp import Tool as MCPTool
 import fastmcp
+try:
+    from fastmcp.exceptions import ToolError
+except ImportError:
+    ToolError = Exception  # Fallback if import structure changes
 
 import os
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 import transformers.utils.chat_template_utils as transformers_utils
 
 from . import ServedLLM
+
+JSONValue = object
+ToolFunctionDefinition: TypeAlias = dict[str, object]
 
 
 class Toolbox(ABC):
@@ -27,38 +38,46 @@ class Toolbox(ABC):
     Note: Decorate all functions that implement tools with @implements_tool
     """
 
-    def __init__(self, id: str, custom_tool_definitions: list[dict] = [], **extra_kwargs) -> None:
+    def __init__(self, id: str, custom_tool_definitions: list[dict[str, JSONValue]] | None = None, **extra_kwargs: object) -> None:
         """Constructor that takes an id and, optionally, custom tool definitions for any or all tools """
+        if custom_tool_definitions is None:
+            custom_tool_definitions = []
         self.id : str = id
         self._build_tool_dictionaries(custom_tool_definitions)
 
-    def _all_tool_functions(self) -> list[Callable]:
+    def _all_tool_functions(self) -> list[Callable[..., object]]:
         """Compose list of functions that implement tools"""
-        all = []
+        all_functions: list[Callable[..., object]] = []
         for name in dir(self):
-            attr = getattr(self, name)
-            if callable(attr) and hasattr(attr, '_is_tool_implemenation'):
-                all.append(attr)
-        return all
+            attr: object = getattr(self, name)  # pyright: ignore[reportAny]
+            if callable(attr) and hasattr(attr, "_is_tool_implemenation"):
+                all_functions.append(attr)
+        return all_functions
 
     @staticmethod
-    def _derive_json_schema(func: Callable) -> dict:
+    def _derive_json_schema(func: Callable[..., object]) -> dict[str, JSONValue]:
         """Compose tool definition from function metadata (including docstrings!)"""
-        return transformers_utils.get_json_schema(func)
+        schema_obj: object = transformers_utils.get_json_schema(func)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+        assert isinstance(schema_obj, dict)
+        schema: dict[str, JSONValue] = schema_obj  # pyright: ignore[reportUnknownVariableType]
+        return schema
 
     @staticmethod
-    def _get_custom_schema(custom_tool_definitions: list[dict], tool_name: str) -> dict:
+    def _get_custom_schema(custom_tool_definitions: list[dict[str, JSONValue]], tool_name: str) -> dict[str, JSONValue]:
         """Given a tool name, find its custom tool definition if one exists"""
         for tool_definition in custom_tool_definitions:
-            name: str = tool_definition['function']['name']
-            if name == tool_name:
-                return tool_definition
+            function_def_obj: object = tool_definition.get("function")
+            function_def: dict[str, object] | None = function_def_obj if isinstance(function_def_obj, dict) else None  # pyright: ignore[reportUnknownVariableType]
+            if function_def is not None:
+                name_obj = function_def.get("name")
+                if isinstance(name_obj, str) and name_obj == tool_name:
+                    return tool_definition
         return {}
 
-    def _build_tool_dictionaries(self, custom_tool_definitions: list[dict]) -> None:
+    def _build_tool_dictionaries(self, custom_tool_definitions: list[dict[str, JSONValue]]) -> None:
         """Create mappings of tool names to specifications"""
-        self._registered_functions : dict[str, Callable] = {}
-        self._tool_definitions : dict[str, dict] = {}
+        self._registered_functions : dict[str, Callable[..., object]] = {}
+        self._tool_definitions : dict[str, ToolFunctionDefinition] = {}
         # derive default definitions from decoated methods and trsnaformers_utils
         for func in self._all_tool_functions():
             tool_name: str = func.__name__
@@ -69,39 +88,39 @@ class Toolbox(ABC):
             else:
                 self._tool_definitions[tool_name] = self._derive_json_schema(func)
 
-    def functions(self) -> dict[str, Callable]:
+    def functions(self) -> dict[str, Callable[..., object]]:
         """Get mapping of tool names to corresponding callable functions """
         return self._registered_functions
 
-    def get_function(self, toolname: str) -> Callable:
+    def get_function(self, toolname: str) -> Callable[..., object]:
         """Look up tool's python function """
         return self._registered_functions[toolname]
 
-    def get_tool_definition(self, toolname : str) -> dict:
+    def get_tool_definition(self, toolname : str) -> ToolFunctionDefinition:
         """ look up definition of a given tool """
         return self._tool_definitions[toolname]
 
-    async def call(self, tool: str, arguments: dict) -> dict:
+    async def call(self, tool: str, arguments: dict[str, JSONValue]) -> dict[str, object]:
         """ Call a tool by the corresponding function name"""
-        if tool not in self._registered_functions:
-            return {"error": f"There is no tool {tool} in our {id} toolbox"}
-        else:
-            func = getattr(self, tool)
-            output = None
-            try:
-                # if async coroutine, await it
-                if inspect.iscoroutinefunction(func):
-                    output = await func(**arguments)
-                else:
-                    output = func(**arguments)
-                    print(f"\033[90m--> output of tool call: {output}\033[0m")
-            except Exception as e:
-                traceback.print_exc()
-                return {"error": f"Error calling {tool}: {str(e)}"}
-            return {"content": output}
+        try:
+            if tool not in self._registered_functions:
+                return {"error": f"There is no tool {tool} in our {id} toolbox"}
+            func: Callable[..., object] = self._registered_functions[tool]
+            output: object | None = None
+            # if async coroutine, await it
+            if inspect.iscoroutinefunction(func):
+                output = await func(**arguments)  # type: ignore[misc]  # pyright: ignore[reportAny]
+            else:
+                output = func(**arguments)
+                print(f"\033[90m--> output of tool call: {output}\033[0m")
+        except Exception as e:
+            traceback.print_exc()
+            return {"error": f"Error calling {tool}: {str(e)}"}
+        return {"content": output}
 
-    def __str__(self):
-        string = f"\nToolbox {self.id} istantiated with the following tools:\n"
+    @override
+    def __str__(self) -> str:
+        string: str = f"\nToolbox {self.id} istantiated with the following tools:\n"
         for tool_name, tool_definition  in self._tool_definitions.items():
             string = (f"{string}- {tool_name}\n{tool_definition}\n")
         return string
@@ -116,15 +135,19 @@ class MCPToolbox(Toolbox):
     toolbox to function correctly
     """
 
-    _registered_functions : dict[str, Callable] = {}
+    _registered_functions : dict[str, Callable[..., object]] = {}
 
     def __init__(
         self,
         id: str,
-        mcp_config: dict,
-        fixed_sampling_params: dict = {},
-        default_llm_for_sampling: ServedLLM = ServedLLM(),
+        mcp_config: dict[str, JSONValue],
+        fixed_sampling_params: dict[str, JSONValue] | None = None,
+        default_llm_for_sampling: ServedLLM | None = None,
     ) -> None:
+        if fixed_sampling_params is None:
+            fixed_sampling_params = {}
+        if default_llm_for_sampling is None:
+            default_llm_for_sampling = ServedLLM()
         super().__init__(id)
         from .sampling import LLMSampler
         llm_sampler = LLMSampler(
@@ -132,10 +155,12 @@ class MCPToolbox(Toolbox):
             fixed_sampling_params = fixed_sampling_params,
             default_llm = default_llm_for_sampling,
         )
-        self._mcp_client = fastmcp.Client(mcp_config, sampling_handler=llm_sampler.sampling_handler)
+        self._mcp_client: fastmcp.Client[Any] = fastmcp.Client(  # pyright: ignore[reportExplicitAny]
+            mcp_config, sampling_handler=llm_sampler.sampling_handler
+        )
 
     @staticmethod
-    def derive_tool_definition(mcp_tool: MCPTool) -> dict:
+    def derive_tool_definition(mcp_tool: MCPTool) -> dict[str, JSONValue]:
         """Convert an MCP tool to a tool description (dictionary)"""
         return {
             "type": "function",
@@ -146,23 +171,28 @@ class MCPToolbox(Toolbox):
             }
         }
 
-    async def prepare_mcp_tools(self, tool_subset: list[str]):
+    async def prepare_mcp_tools(self, tool_subset: list[str]) -> None:
         """ query the mcp server for all of the pertinent tool details """
         async with self._mcp_client as client:
             mcp_tools = await client.list_tools()
             for mcp_tool in mcp_tools:
                 # if a nonempty subset is specified, use it as a filter
-                if tool_subset and (not mcp_tool.name in tool_subset):
+                if tool_subset and (mcp_tool.name not in tool_subset):
                     continue
                 # add to tool dictionary
                 self._tool_definitions[mcp_tool.name] = self.derive_tool_definition(mcp_tool)
                 # create wrapped function for function dictionary
-                async def wrapped_function(arguments: dict) -> dict | None:
-                    output = await self._mcp_client.call_tool(mcp_tool.name, arguments)
+                async def wrapped_function(
+                    arguments: dict[str, JSONValue],
+                    *,
+                    tool_name: str = mcp_tool.name,
+                ) -> dict[str, object] | None:
+                    output = await self._mcp_client.call_tool(tool_name, arguments)
                     return output.structured_content
                 self._registered_functions[mcp_tool.name] = wrapped_function
 
-    async def call(self, tool: str, arguments: dict) -> dict[str, str|int|float|dict[str, str|int|float]]:
+    @override
+    async def call(self, tool: str, arguments: dict[str, JSONValue]) -> dict[str, object]:
         """ Call a tool by the corresponding function name"""
         try:
             if tool not in self._registered_functions:
@@ -172,15 +202,22 @@ class MCPToolbox(Toolbox):
                     try:
                         output = await client.call_tool(tool, arguments)
                         print(output)
-                        if getattr(output, 'data') and output.data: # FastMCP style
-                            output = output.data
-                        elif getattr(output, 'structured_content') and output.structured_content:
-                            output = output.structured_content
+                        result_payload: object = output
+                        data_payload: object | None = getattr(output, "data", None)
+                        structured_content: object | None = getattr(
+                            output, "structured_content", None
+                        )
+                        if data_payload:
+                            result_payload = data_payload
+                        elif structured_content:
+                            result_payload = structured_content
                         else:
-                            output = output.content[0].text # type: ignore
-                        print(f"\n\033[90m--> output of tool call: {output}\033[0m")
-                        return {"content": output}
-                    except fastmcp.exceptions.ToolError as e:
+                            # Extract text from content, handling different content types
+                            content_item = output.content[0]
+                            result_payload = getattr(content_item, "text", str(content_item))
+                        print(f"\n\033[90m--> output of tool call: {result_payload}\033[0m")
+                        return {"content": result_payload}
+                    except ToolError as e:
                         print(f"\n\033[90m--> tool call ecountered error: {e}\033[0m")
                         return {"error": str(e)}
                     
@@ -202,11 +239,11 @@ class Workshop:
         self._toolboxes: list[Toolbox] = []
         self._toolbox_by_toolname: dict[str, Toolbox] = {}
         self._resource_inventory: dict[str, str] = {}
-        self._tool_definitions : dict[str, dict] = {}
+        self._tool_definitions : dict[str, ToolFunctionDefinition] = {}
 
 
     @staticmethod
-    def get_function_arguments(func: Callable) -> str:
+    def get_function_arguments(func: Callable[..., object]) -> str:
         """Helper function to return a string of argument names for the given function."""
         sig = inspect.signature(func)
         return f"({', '.join(sig.parameters.keys())})"
@@ -218,16 +255,13 @@ class Workshop:
         self._toolboxes.append(tb)
         for function_name in tb.functions():
             print(f"\tfunction {function_name}{self.get_function_arguments(tb.get_function(function_name))}")
-            if function_name in self._toolboxes:
-                print(
-                    f"\nWARNING: You are introducing a tool {function_name} from {tb.id} that is"
-                    f" replacing a previously-added tool from {self._toolboxes[function_name]} with"
-                    " the same name!"
-                )
+            if function_name in self._toolbox_by_toolname:
+                replaced_from = self._toolbox_by_toolname[function_name].id
+                print(f"\nWARNING: You are introducing a tool {function_name} from {tb.id} that is replacing a previously-added tool from {replaced_from} with the same name!")
             self._toolbox_by_toolname[function_name] = tb
             self._tool_definitions[function_name] = tb.get_tool_definition(function_name)
 
-    async def setup_toolboxes(self, toolboxes: list[str], tool_kwargs: dict) -> None:
+    async def setup_toolboxes(self, toolboxes: list[str], tool_kwargs: dict[str, object]) -> None:
         """Prepare all necessary tools from a list of strings referencing tool_definitions
 
         Args:
@@ -257,17 +291,18 @@ class Workshop:
                 self._add_toolbox(tb)
             # TODO: add associated resources to inventory
 
-    def list_of_all_tools(self) -> list[dict]:
+    def list_of_all_tools(self) -> list[ToolFunctionDefinition]:
         """ ennumeration of tools from all sources """
         return list(self._tool_definitions.values())
 
+    @override
     def __str__(self) -> str:
         string = "\nToolshed instantiated with the following tools:\n"
         for tool, toolbox in self._toolbox_by_toolname.items():
             string = (f"{string}- {tool}() provided by {toolbox.id}\n")
         return string
 
-    async def call(self, tool: str, arguments: dict) -> dict:
+    async def call(self, tool: str, arguments: dict[str, JSONValue]) -> dict[str, object]:
         """ execute the tool call by waiting for async function """
         toolbox = self._toolbox_by_toolname[tool]
         result = await toolbox.call(tool, arguments)

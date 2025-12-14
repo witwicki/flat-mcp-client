@@ -6,6 +6,7 @@ import logging
 import colorlog
 from pprint import pformat
 from dataclasses import dataclass
+from types import TracebackType
 
 
 # USEFUL STRING LITERALS
@@ -32,7 +33,7 @@ os.makedirs(log_directory, exist_ok=True)
 package_logger = logging.getLogger('flat_mcp_cient')
 package_logger.setLevel(logging.DEBUG) # handlers can override this in init_logger()
 
-def handle_uncaught_exception(exc_type, exc_value, exc_traceback):
+def handle_uncaught_exception(exc_type: type[BaseException], exc_value: BaseException, exc_traceback: TracebackType | None) -> None:
     """
     Handler for uncaught exceptions that logs the error and traceback.
     """
@@ -44,7 +45,7 @@ def handle_uncaught_exception(exc_type, exc_value, exc_traceback):
     # Use the logging module to log the exception at the CRITICAL level
     logging.critical("Uncaught exception:", exc_info=(exc_type, exc_value, exc_traceback))
 
-def init_logger(log_level: int = logging.INFO):
+def init_logger(log_level: int = logging.INFO) -> None:
     # colorful logging on the screen
     handler = colorlog.StreamHandler()
     handler.setFormatter(colorlog.ColoredFormatter(
@@ -69,27 +70,27 @@ def init_logger(log_level: int = logging.INFO):
     log_file_handler.setLevel(logging.DEBUG)
     package_logger.addHandler(log_file_handler)
     
-def enable_verbose_debug_output():
+def enable_verbose_debug_output() -> None:
     init_logger(logging.DEBUG)
 
-def info(msg) -> None:
+def info(msg: object) -> None:
     print(msg) # print to screen
     package_logger.info(msg) # and write to log
 
-def debug(msg) -> None:
+def debug(msg: object) -> None:
     package_logger.debug(msg)
 
-def debug_pp(msg) -> None:
+def debug_pp(msg: object) -> None:
     debug(f"{pformat(msg)}")
 
-def warning(msg) -> None:
+def warning(msg: object) -> None:
     package_logger.warning(msg)
 
-def error(msg) -> None:
+def error(msg: object) -> None:
     package_logger.error(msg)
 
 # AFFORDANCE FOR IMPORTING THIS LIBRARY FOR USE IN OTHER PROJECTS
-def _get_calling_package() -> str | None:
+def get_calling_package() -> str | None:
     """Inspect the call stack to determine the calling package (not flat_mcp_client).
 
     This utility is used by prompts, tool_defs, and mcp_refs modules to enable
@@ -110,8 +111,9 @@ def _get_calling_package() -> str | None:
     for frame_info in frame_infos:
         frame = frame_info.frame
         # Get the module of the frame
-        module_name = frame.f_globals.get('__name__', '')
-        file_path = frame_info.filename
+        module_name_obj: object = frame.f_globals.get("__name__", "")  # pyright: ignore[reportAny]
+        module_name = module_name_obj if isinstance(module_name_obj, str) else ""
+        file_path: str = frame_info.filename
 
         # Skip if it's from flat_mcp_client, stdlib, or common directory names
         if (module_name.startswith('flat_mcp_client') or
@@ -123,8 +125,8 @@ def _get_calling_package() -> str | None:
         # For __main__, try to infer package from file path
         if module_name == '__main__' and file_path:
             # Get the directory containing the file
-            file_dir = os.path.dirname(os.path.abspath(file_path))
-            dir_name = os.path.basename(file_dir)
+            file_dir: str = os.path.dirname(os.path.abspath(file_path))
+            dir_name: str = os.path.basename(file_dir)
 
             # Check if there's an __init__.py in the directory (indicating it's a package)
             if os.path.exists(os.path.join(file_dir, '__init__.py')):
@@ -138,7 +140,7 @@ def _get_calling_package() -> str | None:
 
         # Extract the top-level package name
         if module_name and '.' in module_name:
-            package = module_name.split('.')[0]
+            package: str = module_name.split('.')[0]
             # Skip common non-package directory names and stdlib
             if package not in ['src', 'tests', 'test'] and package not in stdlib_prefixes:
                 return package
@@ -146,3 +148,18 @@ def _get_calling_package() -> str | None:
             return module_name
 
     return None
+
+# Backwards compatibility: old private name
+_get_calling_package = get_calling_package
+
+__all__ = [
+    "ModelProvider",
+    "TerminationCondition",
+    "ServedLLM",
+    "info",
+    "debug",
+    "debug_pp",
+    "warning",
+    "error",
+    "get_calling_package",
+]

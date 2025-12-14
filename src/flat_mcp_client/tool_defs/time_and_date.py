@@ -1,13 +1,12 @@
-from datetime import datetime, date, timedelta
-from typing import Optional
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-from geopy.geocoders import Nominatim
+from geopy.geocoders import Nominatim  # pyright: ignore[reportMissingTypeStubs]
 from timezonefinder import TimezoneFinder
 import humanize
 
 from flat_mcp_client.tools import Toolbox
 from . import implements_tool
-from flat_mcp_client import debug, debug_pp
+from flat_mcp_client import debug
 
 
 class TimeAndDateToolbox(Toolbox):
@@ -27,7 +26,7 @@ class TimeAndDateToolbox(Toolbox):
 
     @staticmethod
     @implements_tool
-    def clock(timezone: Optional[str] = None) -> str:
+    def clock(timezone: str | None = None) -> str:
         """Get the current time here, or optionally, in a specified timezone or location.  Call this function without any arguments
         to the the local time.
 
@@ -43,10 +42,18 @@ class TimeAndDateToolbox(Toolbox):
         except ZoneInfoNotFoundError:
             # and next by the location (treating the `timezone` as a location)
             try:
-                geolocator = Nominatim(user_agent="time_and_date_agent")
-                location = geolocator.geocode(timezone)
-                tz_name = TimezoneFinder().timezone_at(lng=location.longitude, lat=location.latitude) # type: ignore missing fields
-                valid_timezone = ZoneInfo(tz_name) # type: ignore possibility that tz_name is None
+                geolocator: object = Nominatim(user_agent="time_and_date_agent")  # type: ignore[reportMissingTypeStubs]
+                location_obj: object | None = getattr(geolocator, "geocode")(timezone)  # type: ignore[reportUnknownArgumentType]  # pyright: ignore[reportAny]
+                if location_obj is None:
+                    return "Unknown.  Please specify a timezone code for that location."
+                longitude = getattr(location_obj, "longitude", None)
+                latitude = getattr(location_obj, "latitude", None)
+                if not isinstance(longitude, (int, float)) or not isinstance(latitude, (int, float)):
+                    return "Unknown.  Please specify a timezone code for that location."
+                tz_name: str | None = TimezoneFinder().timezone_at(lng=longitude, lat=latitude)
+                if tz_name is None:
+                    return "Unknown.  Please specify a timezone code for that location."
+                valid_timezone = ZoneInfo(tz_name)
             except Exception as e:
                 debug(f"Error looking determining timezone: {e}")
                 return "Unknown.  Please specify a timezone code for that location."
@@ -55,7 +62,7 @@ class TimeAndDateToolbox(Toolbox):
 
     @staticmethod
     @implements_tool
-    def time_remaining_until(time: str, date: str = date.today().isoformat(), precisely: bool = False) -> str:
+    def time_remaining_until(time: str, date: str | None = None, precisely: bool = False) -> str:
         """Get the amount of time remaining until a specified time.  Optionally, you can also specify a date.
 
         Args:
@@ -64,7 +71,8 @@ class TimeAndDateToolbox(Toolbox):
             precisely: wheher or not to answer to the highest degree of precision
         """
         try:
-            deadline = datetime.fromisoformat(f"{date} {time}")
+            date_value = date or TimeAndDateToolbox.date_today()
+            deadline = datetime.fromisoformat(f"{date_value} {time}")
             delta = deadline - datetime.now()
             # did the time already pass?
             if delta < timedelta():
@@ -74,5 +82,5 @@ class TimeAndDateToolbox(Toolbox):
                 return humanize.precisedelta(delta)
             else:
                 return humanize.naturaldelta(delta)
-        except:
+        except Exception:
             return "Error: please check the ISO formatting of the arguments"

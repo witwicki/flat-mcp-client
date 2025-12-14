@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from fastmcp.client.sampling import (
     SamplingMessage,
     SamplingParams,
@@ -17,35 +19,50 @@ class LLMSampler(Agent):
     def __init__(
         self,
         mcp_client_name: str,
-            fixed_sampling_params: dict = {},
-        default_llm: ServedLLM = ServedLLM(),
+        fixed_sampling_params: dict[str, object] | None = None,
+        default_llm: ServedLLM | None = None,
     ) -> None:
+        if fixed_sampling_params is None:
+            fixed_sampling_params = {}
+        if default_llm is None:
+            default_llm = ServedLLM()
+
         info(f"Preparing sampling_handler for {mcp_client_name}...")
         # pick model, depending on MCP server preferences
         llm = default_llm
-        if "model_preference" in fixed_sampling_params and fixed_sampling_params["model_preference"]:
-            llm = LLMSampler.resolve_llm_to_sample(default_llm, fixed_sampling_params["model_preference"])
-        # pass any additional metadata straight to Agent.__init__()
-        additional_kwargs = {}
-        if "metadata" in fixed_sampling_params and fixed_sampling_params["metadata"]:
-            additional_kwargs.update(fixed_sampling_params["metadata"])
+        model_preference_obj = fixed_sampling_params.get("model_preference")
+        if isinstance(model_preference_obj, str):
+            llm = LLMSampler.resolve_llm_to_sample(default_llm, model_preference_obj)
+        elif isinstance(model_preference_obj, list):
+            model_preferences: list[str] = [
+                item
+                for item in model_preference_obj  # pyright: ignore[reportUnknownVariableType]
+                if isinstance(item, str)
+            ]
+            if model_preferences:
+                llm = LLMSampler.resolve_llm_to_sample(default_llm, model_preferences)
         super().__init__(
             name = mcp_client_name,
             llm = llm,
-            **additional_kwargs
         )
-        self.fixed_sampling_params = fixed_sampling_params
+        self.fixed_sampling_params: dict[str, object] = fixed_sampling_params
 
 
     async def sampling_handler(
         self,
         messages: list[SamplingMessage],
         params: SamplingParams,
-        context: RequestContext
+        context: RequestContext[object, object, object],  # pyright: ignore[reportInvalidTypeArguments]
     ) -> str:
         """Implementation of client-handled inference call requested by MCP server (invoked by ctx.sample() on the server side)"""
+        _ = messages
+        _ = context
         # Derive chat-response settings from sampling_params
-        sampling_params = deep_merge(self.fixed_sampling_params, params.model_dump())
+        params_dict: dict[str, object] = params.model_dump()
+        sampling_params = deep_merge(
+            self.fixed_sampling_params,
+            params_dict,
+        )
         debug("Sampling params:")
         debug_pp(sampling_params)
         structured_output = None
@@ -67,11 +84,15 @@ class LLMSampler(Agent):
 
 
     @staticmethod
-    def resolve_llm_to_sample(default_llm: ServedLLM, expressed_model_preference: str|list[str]) -> ServedLLM:
+    def resolve_llm_to_sample(default_llm: ServedLLM, expressed_model_preference: str | list[str]) -> ServedLLM:
         """Select the default LLM if any match to preference of mcp server, else just use ollama"""
-        model_preference: list = [expressed_model_preference] if isinstance(expressed_model_preference, str) else expressed_model_preference
+        model_preference: list[str] = (
+            [expressed_model_preference]
+            if isinstance(expressed_model_preference, str)
+            else expressed_model_preference
+        )
         for name in model_preference:
-            assert default_llm.model_name != None
+            assert default_llm.model_name is not None
             if is_substring_ignoring_case_and_special_characters(name, default_llm.model_name):
                 return default_llm
         # fall back to an ollama model

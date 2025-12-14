@@ -1,10 +1,17 @@
+# pyright: reportImportCycles=false
+# Intentional cycle: agents.py → tools.py → sampling.py → agents.py
+# This cycle is safe because:
+# - sampling.py needs Agent as a base class (runtime requirement)
+# - agents.py uses Workshop from tools.py (lazy import in __init__)
+# - tools.py uses LLMSampler from sampling.py (lazy import in MCPToolbox.__init__)
+from __future__ import annotations
 import importlib
 import json
 import logging
 import sys
 import traceback
-from collections.abc import Iterator
-from typing import Annotated, Any, Optional, cast, get_args
+from collections.abc import Iterator, Mapping
+from typing import Annotated, Protocol, TypedDict, TYPE_CHECKING, get_args
 
 import cyclopts
 import ollama
@@ -18,15 +25,34 @@ from . import (
     error, 
     info, 
     init_logger, 
-    _get_calling_package
+    get_calling_package
 )
 from .agent_helpers import generate_random_id
 from .io.ui import HumanInterface
-from .mcp_refs import ExistingMCPReferenceNames
 from .models import Model
-from .tool_defs import ExistingToolDefinitionNames
-from .tools import Workshop
+if TYPE_CHECKING:
+    from .tools import ToolFunctionDefinition
 
+# Generic JSON-friendly structure used for tool calls and chat payloads
+JSONValue = object
+JSONMapping = dict[str, object]
+
+
+class ToolFunctionCall(Protocol):
+    name: str
+    arguments: str | Mapping[str, object]
+
+
+class ToolCallMessage(Protocol):
+    function: ToolFunctionCall
+    id: str | None
+
+
+class StreamedChatMessage(TypedDict, total=False):
+    role: str
+    content: str
+    tool_calls: list[ToolCallMessage]
+    reasoning_content: str
 
 class Context:
     """The acting prompt, structured-output defintions, and latest state information (e.g., chat history),
@@ -46,18 +72,20 @@ class Context:
                2. flat_mcp_client.prompts.{prompt_name} (built-in prompts)
         """
         # lookup prompts and structured output specs
-        self.prompt_name = prompt_name
+        self.prompt_name: str = prompt_name
+        self.system_prompt: str = ""
+        self.structured_output: JSONMapping | None = None
         self.load_system_prompt_and_structured_output()
         # initialize chat history
-        self.latest_user_prompt = ""
-        self.chat_history = []
+        self.latest_user_prompt: str = ""
+        self.chat_history: list[dict[str, object]] = []
 
-    def load_system_prompt_and_structured_output(self):
+    def load_system_prompt_and_structured_output(self) -> None:
         # Detect the calling package
-        calling_package = _get_calling_package()
+        calling_package: str | None = get_calling_package()
 
         # Build list of module paths to try
-        module_paths = []
+        module_paths: list[str] = []
         if calling_package:
             # Try user's project first
             module_paths.append(f"{calling_package}.prompts.{self.prompt_name}")
@@ -65,15 +93,24 @@ class Context:
         module_paths.append(f"flat_mcp_client.prompts.{self.prompt_name}")
 
         # Try each path in order
-        last_error = None
         for module_name in module_paths:
             try:
                 prompt_module = importlib.import_module(module_name)
                 self.system_prompt = getattr(prompt_module, "system_prompt")
-                self.structured_output = getattr(prompt_module, "structured_output", None)
+                structured_output_obj: object | None = getattr(
+                    prompt_module, "structured_output", None
+                )
+                if structured_output_obj is None:
+                    self.structured_output = None
+                    return
+                if not isinstance(structured_output_obj, dict):
+                    raise TypeError(
+                        f"structured_output must be a mapping, got {type(structured_output_obj)}"
+                    )
+                assert isinstance(structured_output_obj, dict)
+                self.structured_output = structured_output_obj
                 return  # Success!
-            except Exception as e:
-                last_error = e
+            except Exception:
                 continue
 
         # If we get here, all attempts failed
@@ -94,10 +131,10 @@ class Context:
             self.prompt_name = new_prompt_name
 
         # Detect the calling package
-        calling_package = _get_calling_package()
+        calling_package = get_calling_package()
 
         # Build list of module paths to try
-        module_paths = []
+        module_paths: list[str] = []
         if calling_package:
             # Try user's project first
             module_paths.append(f"{calling_package}.prompts.{self.prompt_name}")
@@ -108,11 +145,11 @@ class Context:
         for module_name in module_paths:
             try:
                 prompt_module = importlib.import_module(module_name)
-                importlib.reload(prompt_module)
+                _ = importlib.reload(prompt_module)
                 self.system_prompt = getattr(prompt_module, "system_prompt")
                 self.structured_output = getattr(prompt_module, "structured_output", None)
                 return  # Success!
-            except:
+            except Exception:
                 continue
 
         # If we get here, all attempts failed - this shouldn't happen during reload
@@ -122,10 +159,10 @@ class Context:
     def derive_extended_chat_history(
         self,
         user_prompt: str | None,
-        agent_response: dict = {},
-    ) -> list:
+        agent_response: dict[str, object] | None = None,
+    ) -> list[dict[str, object]]:
         """Accounting for latest turn of user and/or agent, generate an extended version of the chat history"""
-        messages = []
+        messages: list[dict[str, object]] = []
         # add conversation history...
         messages.extend(self.chat_history)
         # ...then latest message from user...
@@ -136,25 +173,27 @@ class Context:
             messages.append(agent_response)
         return messages
 
-    def derive_full_history(self, system_prompt_substitutions: dict = {}) -> list:
+    def derive_full_history(self, system_prompt_substitutions: Mapping[str, object] | None = None) -> list[dict[str, object]]:
         """System prompt + chat history"""
+        if system_prompt_substitutions is None:
+            system_prompt_substitutions = {}
         # system prompt...
-        messages = [
+        messages: list[dict[str, object]] = [
             {
                 "role": "system",
-                "content": self.system_prompt.format(**system_prompt_substitutions),
+                "content": self.system_prompt.format(**dict(system_prompt_substitutions)),
             }
         ]
         messages.extend(self.chat_history)
         return messages
 
-    def system_plus_user_prompt(self, system_prompt_substitutions: dict = {}) -> list:
+    def system_plus_user_prompt(self, system_prompt_substitutions: Mapping[str, object] | None = None) -> list[dict[str, object]]:
         """System prompt + latest user prompt"""
         system_prompt = self.system_prompt
         if system_prompt_substitutions:
-            system_prompt = self.system_prompt.format(**system_prompt_substitutions)
+            system_prompt = self.system_prompt.format(**dict(system_prompt_substitutions))
 
-        messages = [
+        messages: list[dict[str, object]] = [
             {
                 "role": "system",
                 "content": system_prompt,
@@ -178,34 +217,40 @@ class Agent:
     def __init__(
         self,
         name: str = "agent_zero",
-        llm: ServedLLM = ServedLLM(),
-        model_params: dict = {},
-        minimize_thinking=False,  # note: paramaters related to thinking/reasoning can be overridden in the chat flow
+        llm: ServedLLM | None = None,
+        model_params: dict[str, JSONValue] | None = None,
+        minimize_thinking: bool = False,  # note: paramaters related to thinking/reasoning can be overridden in the chat flow
         prompt_name: str = "default",
         turn_termination_condition: TerminationCondition = "inference_call_completed",
         max_inference_calls_per_turn: int | None = None,
     ) -> None:
         """Initializer that side-effects the ServedLLM object (llm), specifically filling in the unset default elements"""
-        self.name = name
+        if llm is None:
+            llm = ServedLLM()
+        if model_params is None:
+            model_params = {}
+        self.name: str = name
         # instantiate model
-        self.model = Model.create(llm, model_params, minimize_thinking)
-        self.served_llm = llm
+        self.model: Model = Model.create(llm, model_params, minimize_thinking)
+        self.served_llm: ServedLLM = llm
         # context
-        self.context = Context(prompt_name)
+        self.context: Context = Context(prompt_name)
         # turn termination condition
-        self.turn_termination_condition = turn_termination_condition
-        self.max_inference_calls_per_turn = max_inference_calls_per_turn
-        # tools (to be populated on call to init_workshop)
-        self.list_of_all_tools = []
+        self.turn_termination_condition: TerminationCondition = turn_termination_condition
+        self.max_inference_calls_per_turn: int | None = max_inference_calls_per_turn
+        # tools (to be populated on call to equip)
+        from .tools import Workshop
+        self.workshop: Workshop = Workshop()
+        self.list_of_all_tools: list["ToolFunctionDefinition"] = []
         # interface
-        self.io = HumanInterface()
+        self.io: HumanInterface = HumanInterface()
 
     async def equip(
         self,
-        mcp_servers: list[str] = [],
-        tool_collections: list[str] = [],
-        resources: list[str] = [],
-        tool_kwargs={},
+        mcp_servers: list[str] | None = None,
+        tool_collections: list[str] | None = None,
+        resources: list[str] | None = None,
+        tool_kwargs: dict[str, object] | None = None,
     ) -> None:
         """Initialize workshop, made up of toolboxes and resources
 
@@ -217,6 +262,15 @@ class Agent:
             - resources(list) lists the resources available
             - tool_kwargs(dict) optionally allow specifies arguments to be passed to tools
         """
+        if mcp_servers is None:
+            mcp_servers = []
+        if tool_collections is None:
+            tool_collections = []
+        if resources is None:
+            resources = []
+        if tool_kwargs is None:
+            tool_kwargs = {}
+        from .tools import Workshop
         self.workshop = Workshop()
         await self.workshop.setup_toolboxes(tool_collections, tool_kwargs)
         await self.workshop.connect_with_mcp_servers(
@@ -226,34 +280,40 @@ class Agent:
         self.list_of_all_tools = self.workshop.list_of_all_tools()
         # todo: inventory resourcess
 
-    async def call_tools(self, tool_calls: list) -> dict:
+    async def call_tools(self, tool_calls: list[ToolCallMessage] | ToolCallMessage) -> dict[tuple[str, str, str], dict[str, object]]:
         """call tools, make small modification as necessary, and return a dictionary whose keys are
         (function name, parameters as frozensets) and whose values are the return values of the respective calls"""
-        returns = {}
+        returns: dict[tuple[str, str, str], dict[str, object]] = {}
         if not isinstance(tool_calls, list):
             tool_calls = [tool_calls]
         for tool_call in tool_calls:
             try:
-                function = tool_call.function.name
-                arguments = tool_call.function.arguments
-                tool_call_id = getattr(tool_call, "id", generate_random_id())
+                function: str = tool_call.function.name
+                raw_arguments: object = tool_call.function.arguments
+                tool_call_id = getattr(tool_call, "id", None) or generate_random_id()
                 # accept arguments either as json string or dict
-                if isinstance(arguments, str):
-                    arguments = json.loads(arguments)
+                parsed_arguments: object = raw_arguments
+                if isinstance(raw_arguments, str):
+                    parsed_arguments = json.loads(raw_arguments)  # pyright: ignore[reportAny]
+                if not isinstance(parsed_arguments, Mapping):
+                    raise TypeError("Tool arguments must be mapping or JSON string")
+                arguments: Mapping[str, object] = parsed_arguments  # pyright: ignore[reportUnknownVariableType]
                 # Use JSON serialization to handle unhashable types (lists, nested dicts, etc.)
                 dict_key = (function, tool_call_id, json.dumps(arguments, sort_keys=True))
-                returns[dict_key] = await self.workshop.call(function, arguments)
+                returns[dict_key] = await self.workshop.call(function, dict(arguments))
             except Exception as e:
                 error(e)
-                returns[tool_call] = "Error: Malformed function call"
+                # Create a proper tuple key even for errors
+                error_key = (str(tool_call), generate_random_id(), "{}")
+                returns[error_key] = {"error": "Malformed function call"}
                 debug(f"Further details: {tool_call} resulted in {e}")
         return returns
 
     def update_chat_history(
         self,
         user_prompt: str | None = None,
-        agent_response: dict = {},
-        tool_results: dict = {},
+        agent_response: dict[str, object] | None = None,
+        tool_results: dict[tuple[str, str, str], dict[str, object]] | None = None,
     ) -> None:
         self.context.latest_user_prompt = user_prompt or ""
         updated_history = self.model.extend_messages_with_tool_responses(
@@ -266,10 +326,10 @@ class Agent:
         self,
         user_prompt: str | None,
         overloaded_system_prompt_for_this_response: str | None = None,
-        system_prompt_substitutions: dict[str, str] = {},
-        overloaded_structured_output_for_this_response: dict | None = None,
+        system_prompt_substitutions: Mapping[str, object] | None = None,
+        overloaded_structured_output_for_this_response: dict[str, JSONValue] | None = None,
         use_and_track_history_for_this_response: bool = True,
-    ) -> tuple[str, list, int, list]:
+    ) -> tuple[str, list[ToolCallMessage], int, list[dict[tuple[str, str, str], dict[str, object]]]]:
         """Intended to be called for a single turn of conversation, this function allows agent to
         perform a series of inference calls before expressing a final response.
         """
@@ -286,14 +346,13 @@ class Agent:
         else:
             self.context.latest_user_prompt = user_prompt or ""
         # remember latest agent tool calls (+results), responses, and thinking contents
-        tool_calls = []
-        agent_response = {}
-        tool_results = {}
-        tool_sequence = []
-        response_content = ""
-        thinking_content = ""
-        termination_condition_met = False
-        steps = 0
+        tool_calls: list[ToolCallMessage] = []
+        agent_response: dict[str, object] = {}
+        tool_sequence: list[dict[tuple[str, str, str], dict[str, object]]] = []
+        response_content: str = ""
+        thinking_content: str = ""
+        termination_condition_met: bool = False
+        steps: int = 0
 
         while (not termination_condition_met) and (
             (not self.max_inference_calls_per_turn)
@@ -317,7 +376,9 @@ class Agent:
                 agent_response["reasoning_content"] = thinking_content
 
             # call tools selected by agent
-            tool_results = {}
+            tool_results: dict[
+                tuple[str, str, str], dict[str, object]
+            ] = {}
             if tool_calls:
                 for tool_call in tool_calls:
                     pass
@@ -355,11 +416,11 @@ class Agent:
         # TODO: return the full history of the agent's turn
 
     def generate_and_stream_response(
-        self, use_history: bool = True, system_prompt_substitutions: dict[str, str] = {}
-    ) -> tuple[str, str, list]:
+        self, use_history: bool = True, system_prompt_substitutions: Mapping[str, object] | None = None
+    ) -> tuple[str, str, list[ToolCallMessage]]:
         """Compile augmented context and generate a response to the user's latest query"""
-        context_messages = []
-        complete_response = None
+        context_messages: list[dict[str, object]] = []
+        complete_response: ollama.ChatResponse | None = None
         if use_history:
             context_messages = self.context.derive_full_history(
                 system_prompt_substitutions
@@ -395,9 +456,9 @@ class Agent:
             )
             response = iter([])  # dummy
         if isinstance(complete_response, ollama.ChatResponse):
-            response_content = cast(str, complete_response.message.content)
-            thinking_content = cast(str, complete_response.message.thinking)
-            tool_calls = cast(list, complete_response.message.tool_calls)
+            response_content: str = complete_response.message.content or ""
+            thinking_content: str = complete_response.message.thinking or ""
+            tool_calls: list[ToolCallMessage] = complete_response.message.tool_calls or []  # pyright: ignore[reportAssignmentType]
             return response_content, thinking_content, tool_calls
         else:
             return "", "", []
@@ -413,7 +474,7 @@ class Agent:
             if agent_starts or conversation_underway:
                 # reload system prompt (handy for live editing)
                 self.context.reload_system_prompt_and_structured_output()
-                response_content, _, _, _ = await self.agentic_response(user_prompt)
+                _response_content, _, _, _ = await self.agentic_response(user_prompt)
             
             # USER'S TURN
             user_prompt = self.io.get_user_input()  # blocking
@@ -447,15 +508,15 @@ tool_args_group = cyclopts.Group(
 async def chatloop(
     provider: ModelProvider = "ollama",
     endpoint: Annotated[
-        Optional[str],
+        str | None,
         cyclopts.Parameter(help="e.g., http://localhost:11434 by default for ollama"),
     ] = None,
     model: Annotated[
-        Optional[str],
+        str | None,
         cyclopts.Parameter(help="default is Qwen-8B, e.g., qwen3:8b got ollama"),
     ] = None,
     model_path: Annotated[
-        Optional[str],
+        str | None,
         cyclopts.Parameter(help="path to local gguf file, if using llama.cpp"),
     ] = None,
     turn_termination_condition: Annotated[
@@ -466,12 +527,12 @@ async def chatloop(
     minimize_thinking: bool = False,
     debug: bool = False,
     mcps: Annotated[
-        list[ExistingMCPReferenceNames], cyclopts.Parameter(group=mcp_args_group)
-    ] = [],  # type: ignore
+        list[str] | None, cyclopts.Parameter(group=mcp_args_group)  # type: ignore[reportInvalidTypeForm]
+    ] = None,
     all_mcps: Annotated[bool, cyclopts.Parameter(group=mcp_args_group)] = False,
     tools: Annotated[
-        list[ExistingToolDefinitionNames], cyclopts.Parameter(group=tool_args_group)
-    ] = [],  # type: ignore
+        list[str] | None, cyclopts.Parameter(group=tool_args_group)  # type: ignore[reportInvalidTypeForm]
+    ] = None,
     all_tools: Annotated[bool, cyclopts.Parameter(group=tool_args_group)] = False,
 ):
     init_logger(logging.DEBUG if debug else logging.WARNING)
@@ -488,18 +549,23 @@ async def chatloop(
         model_path=model_path,
     )
     info("\n\nInitializing agent...")
-    kwargs = {
-        "llm": llm,
-        "turn_termination_condition": turn_termination_condition,
-        "max_inference_calls_per_turn": max_inference_calls_per_turn,
-        "minimize_thinking": minimize_thinking,
-    }
-    agent = Agent(**kwargs)
+    agent = Agent(
+        llm=llm,
+        turn_termination_condition=turn_termination_condition,
+        max_inference_calls_per_turn=max_inference_calls_per_turn,
+        minimize_thinking=minimize_thinking,
+    )
     if all_mcps:
+        from .mcp_refs import ExistingMCPReferenceNames
         mcps = list(get_args(ExistingMCPReferenceNames))
     if all_tools:
+        from .tool_defs import ExistingToolDefinitionNames
         tools = list(get_args(ExistingToolDefinitionNames))
-    tool_kwargs = {
+    if mcps is None:
+        mcps = []
+    if tools is None:
+        tools = []
+    tool_kwargs: dict[str, object] = {
         "llm": llm,
     }
     await agent.equip(

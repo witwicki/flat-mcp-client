@@ -2,7 +2,7 @@ import time
 import os
 import atexit
 from enum import Enum
-import readline # allow input() to have a history
+import readline  # allow input() to have a history
 from rich.console import Console
 from collections.abc import Iterator
 import ollama
@@ -12,7 +12,7 @@ from flat_mcp_client import debug, warning
 
 # Readline helper
 DIR = os.path.dirname(os.path.abspath(__file__))
-def maintain_readline_history(readline_history_path: str):
+def maintain_readline_history(readline_history_path: str) -> None:
     if os.path.exists(readline_history_path):
         try:
             readline.read_history_file(readline_history_path)
@@ -20,18 +20,18 @@ def maintain_readline_history(readline_history_path: str):
             warning(f"readline failed to retrieve history! (error={e}).   Removing history file...")
             os.remove(readline_history_path)
     readline.set_history_length(100)
-    atexit.register(readline.write_history_file, readline_history_path)
+    _ = atexit.register(readline.write_history_file, readline_history_path)
 
 # Modes and decorations
 class OutputDisplayMode(Enum):
     SYSTEM = (None)
-    AGENT_CONTENT = ('green3')
-    AGENT_THINKING = ('grey66')
-    AGENT_TOOLING = ('dark_green')
+    AGENT_CONTENT = ("green3")
+    AGENT_THINKING = ("grey66")
+    AGENT_TOOLING = ("dark_green")
     # Note: styled USER text (which happens to be blue) is treated separately in the get_input() method
 
-    def __init__(self, style):
-        self.style = style
+    def __init__(self, style: str | None):
+        self.style: str | None = style
 
 
 class TerminalIO:
@@ -39,8 +39,8 @@ class TerminalIO:
     with a few pretty decorations
     """
 
-    def __init__(self, readline_history_path: str = f"{DIR}/.terminal_input_history"):
-        self.console = Console(record=True, highlight=False)
+    def __init__(self, readline_history_path: str = f"{DIR}/.terminal_input_history") -> None:
+        self.console: Console = Console(record=True, highlight=False)
         self.console.style = OutputDisplayMode.SYSTEM.style
         # take care of readline history
         maintain_readline_history(readline_history_path)
@@ -57,10 +57,10 @@ class TerminalIO:
 
     def display_partial_tool_call(
         self,
-        name,
-        arguments,
+        name: str,
+        arguments: object,
         starting: bool = False,
-        finishing: bool = False
+        finishing: bool = False,
     ) -> None:
         """Helper function that prints first part, middle, or end, of a tool call"""
         if starting:
@@ -91,18 +91,21 @@ class TerminalIO:
                 # if we see a new tool call, print previous
                 starting_new_tool_call = False
                 new_index = getattr(new_chunk.message.tool_calls[0], "index", 0)
-                function = accumulated_response.message.tool_calls[new_index].function # type: ignore
+                # Ensure tool_calls exists in accumulated response
+                if accumulated_response.message.tool_calls is None:
+                    return current_toolcall_index
+                function = accumulated_response.message.tool_calls[new_index].function
                 if new_index > current_toolcall_index:
                     starting_new_tool_call = True
                     if new_index > 0:
-                        last_function = accumulated_response.message.tool_calls[new_index-1].function # type: ignore
+                        last_function = accumulated_response.message.tool_calls[new_index-1].function
                         self.display_partial_tool_call(
                             last_function.name,
                             last_function.arguments,
                             starting = False,
                             finishing = True,
                         )
-                        #debug(f"ToolCall(function=Function(name='{last_function.name}', arguments={last_function.arguments}))")
+                        # debug(f"ToolCall(function=Function(name='{last_function.name}', arguments={last_function.arguments}))")
                 else:
                     # if not starting new call, take only the arguments of the latest chunk_origin_type
                     function = new_chunk.message.tool_calls[0].function
@@ -116,7 +119,7 @@ class TerminalIO:
         return new_index
 
 
-    def stream_output(self, response: Iterator[ollama.ChatResponse], name:str = "") -> tuple[ollama.ChatResponse|None, int, int]:
+    def stream_output(self, response: Iterator[ollama.ChatResponse] | Iterator[ChatCompletionChunk], name: str = "") -> tuple[ollama.ChatResponse | None, int, int]:
         """Dispay the chat response on the terminal as it is received
         and return the complete message.
         """
@@ -148,7 +151,7 @@ class TerminalIO:
                     chunk,
                     running_accumulation = accumulated_response
                 )
-            elif isinstance(chunk, ChatCompletionChunk):
+            elif isinstance(chunk, ChatCompletionChunk):  # pyright: ignore[reportUnnecessaryIsInstance]
                 accumulated_response, new_chunk = VLLMModel.accumulate_streaming_response_chunks(
                     chunk,
                     running_accumulation = accumulated_response,
@@ -194,6 +197,6 @@ class TerminalIO:
                     time_to_first_nonthinking_token = nanoseconds_consumed
         # print any last unprinted toolcall chunks
         if last_toolcall_chunk_args:
-            self.display_partial_tool_call(None, last_toolcall_chunk_args, starting=False, finishing=True)
+            self.display_partial_tool_call("", last_toolcall_chunk_args, starting=False, finishing=True)
             #debug(f"ToolCall(function=Function(name='{last_function.name}', arguments={last_function.arguments}))")
         return accumulated_response, time_to_first_token, time_to_first_nonthinking_token

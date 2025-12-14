@@ -7,11 +7,11 @@ from flat_mcp_client import debug_pp
 class ModelStats:
     """Tracking statistics about context length"""
 
-    def __init__(self, model_metadata: dict):
-        self.model_metadata = model_metadata
+    def __init__(self, model_metadata: dict[str, object]):
+        self.model_metadata: dict[str, object] = model_metadata
 
         # vectors of inference metrics, one element per inference call
-        self.inference = {
+        self.inference: dict[str, list[float]] = {
             "time_to_first_token": [],
             "time_to_first_nonthinking_token": [],
             "prompt_parsing_time": [],
@@ -22,30 +22,39 @@ class ModelStats:
         }
         # number of inference calls
         self._n: int = 0
-        # derived statistics
-        self.stats: dict = {}
+        # derived statistics (computed in compute method)
+        self.stats: dict[str, float] = {}
+        self.inference_np: dict[str, np.ndarray] = {}
+        self.overall: SimpleNamespace = SimpleNamespace()
 
-    def append(self, **kwargs) -> None:
+    def append(self, **kwargs: float) -> None:
         """Append measurements from one inference result to `inference` vector"""
         for key, value in kwargs.items():
             self.inference[key].append(value)
         self._n += 1
 
-    def compute(self) -> dict:
+    def compute(self) -> dict[str, float]:
         """Compute and return simple stats across all inference calls"""
         debug_pp(self.inference)
         if self._n > 0:
             # numpy arrays for efficient operations
-            self.inference_np = {}
-            for key, value in self.inference.items():
-                self.inference_np[key] = np.array(value)
-            # tokens / second generation
+            self.inference_np = {
+                key: np.array(value, dtype=float) for key, value in self.inference.items()
+            }
+            # simple python stats
+            input_tokens: float = sum(self.inference["num_input_tokens"])
+            parsing_time: float = sum(self.inference["prompt_parsing_time"])
+            output_tokens: float = sum(self.inference["num_output_tokens"])
+            generation_time: float = sum(self.inference["generation_time"])
+            average_ttft = sum(self.inference["time_to_first_token"]) / self._n
+            average_ttfnt = sum(self.inference["time_to_first_nonthinking_token"]) / self._n
+            total_inference_time = sum(self.inference["response_time"])
             self.stats = {
-                "average_ttft": float(np.mean(self.inference_np["time_to_first_token"])),
-                "average_ttfnt": float(np.mean(self.inference_np["time_to_first_nonthinking_token"])),
-                "input_tps": float(np.sum(self.inference_np["num_input_tokens"]) / np.sum(self.inference_np["prompt_parsing_time"])),
-                "output_tps": float(np.sum(self.inference_np["num_output_tokens"]) / np.sum(self.inference_np["generation_time"])),
-                "total_inference_time": float(np.sum(self.inference_np["response_time"])),
+                "average_ttft": average_ttft,
+                "average_ttfnt": average_ttfnt,
+                "input_tps": float(input_tokens / parsing_time),
+                "output_tps": float(output_tokens / generation_time),
+                "total_inference_time": total_inference_time,
             }
             # create object reference-able with dot notation (e.g., `overall.ttnt`)
             self.overall = SimpleNamespace(**self.stats)

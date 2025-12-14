@@ -1,19 +1,20 @@
-from flat_mcp_client.io.terminal_io import TerminalIO
+from .terminal_io import TerminalIO
 from collections.abc import Iterator
 import ollama
+from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 
 
 class HumanInterface:
     """A generalized interface by which a human can observe or otherwise interact with an agent"""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.user_inputting: bool = False
         self.latest_user_input: str = ""
-        self.terminal = TerminalIO()
+        self.terminal: TerminalIO = TerminalIO()
         # TODO: add SpeechIO
 
     def get_user_input(self):
         return self.terminal.get_input()
 
-    def stream_output(self, response: Iterator[ollama.ChatResponse], name:str = "") -> tuple[ollama.ChatResponse|None, int, int]:
+    def stream_output(self, response: Iterator[ollama.ChatResponse] | Iterator[ChatCompletionChunk], name:str = "") -> tuple[ollama.ChatResponse|None, int, int]:
         return self.terminal.stream_output(response, name = name)
